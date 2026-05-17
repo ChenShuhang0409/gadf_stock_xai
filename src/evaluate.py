@@ -18,27 +18,25 @@ from sklearn.metrics import (
 )
 from torch.utils.data import DataLoader, TensorDataset
 
-from src.models import SimpleCNN
+from src.models import get_model
 from src.utils import ensure_dir, get_device, save_json, setup_logger
 
 logger = setup_logger()
 
 
-def load_model(checkpoint_path: Path, device: torch.device) -> Tuple[SimpleCNN, dict]:
+def load_model(checkpoint_path: Path, device: torch.device) -> Tuple[torch.nn.Module, dict]:
     checkpoint = torch.load(checkpoint_path, map_location=device)
     config = checkpoint['config']
     
-    in_channels = config['model']['in_channels']
-    num_classes = config['model']['num_classes']
-    
-    model = SimpleCNN(in_channels=in_channels, num_classes=num_classes)
+    model = get_model(config)
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(device)
     model.eval()
     
     logger.info(f"Loaded model from {checkpoint_path}")
+    logger.info(f"Model name: {checkpoint.get('model_name', 'unknown')}")
     logger.info(f"Model was trained for {checkpoint['epoch']} epochs")
-    logger.info(f"Best val accuracy: {checkpoint['best_val_accuracy']:.4f}")
+    logger.info(f"Best metric: {checkpoint.get('best_metric_name', 'unknown')}={checkpoint.get('best_metric_value', 'unknown'):.4f}")
     
     return model, config
 
@@ -51,10 +49,6 @@ def load_test_data(config: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np
     dates = np.load(processed_dir / 'dates.npy', allow_pickle=True)
     future_returns = np.load(processed_dir / 'future_returns.npy')
     
-    train_start = pd.Timestamp(config['split']['train_start'])
-    train_end = pd.Timestamp(config['split']['train_end'])
-    val_start = pd.Timestamp(config['split']['val_start'])
-    val_end = pd.Timestamp(config['split']['val_end'])
     test_start = pd.Timestamp(config['split']['test_start'])
     test_end = pd.Timestamp(config['split']['test_end'])
     
@@ -75,7 +69,7 @@ def load_test_data(config: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np
 
 
 def predict(
-    model: SimpleCNN,
+    model: torch.nn.Module,
     X_test: np.ndarray,
     batch_size: int,
     device: torch.device
@@ -125,6 +119,88 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray) 
     metrics['confusion_matrix'] = cm.tolist()
     
     return metrics
+
+
+def compute_baseline_metrics(y_true: np.ndarray) -> Dict:
+    n_total = len(y_true)
+    n_label_0 = int(np.sum(y_true == 0))
+    n_label_1 = int(np.sum(y_true == 1))
+    
+    always_0_acc = n_label_0 / n_total
+    always_1_acc = n_label_1 / n_total
+    
+    if n_label_0 >= n_label_1:
+        majority_acc = always_0_acc
+        majority_class = 0
+    else:
+        majority_acc = always_1_acc
+        majority_class = 1
+    
+    baseline = {
+        'always_predict_0_accuracy': always_0_acc,
+        'always_predict_1_accuracy': always_1_acc,
+        'majority_class': majority_class,
+        'majority_class_accuracy': majority_acc,
+        'test_label_distribution': {
+            'n_total': n_total,
+            'n_label_0': n_label_0,
+            'n_label_1': n_label_1,
+            'pct_label_0': float(n_label_0 / n_total * 100),
+            'pct_label_1': float(n_label_1 / n_total * 100)
+        }
+    }
+    
+    return baseline
+
+
+def compute_diagnostics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    probs: np.ndarray
+) -> Dict:
+    pred_0_count = int(np.sum(y_pred == 0))
+    pred_1_count = int(np.sum(y_pred == 1))
+    prob_up_mean = float(np.mean(probs[:, 1]))
+    prob_up_std = float(np.std(probs[:, 1]))
+    
+    n_total = len(y_true)
+    n_label_0 = int(np.sum(y_true == 0))
+    n_label_1 = int(np.sum(y_true == 1))
+    
+    cm = confusion_matrix(y_true, y_pred)
+    
+    unique_pred_classes = sorted(list(set(y_pred.tolist())))
+    collapsed = len(unique_pred_classes) == 1
+    
+    if collapsed:
+        recommendation = "Do not run LRP or clustering until model predicts both classes."
+    else:
+        recommendation = "Model predicts both classes. LRP and clustering can be considered."
+    
+    diagnostics = {
+        'collapsed_prediction': collapsed,
+        'unique_pred_classes': unique_pred_classes,
+        'recommendation': recommendation,
+        'test_pred_0_count': pred_0_count,
+        'test_pred_1_count': pred_1_count,
+        'test_prob_up_mean': prob_up_mean,
+        'test_prob_up_std': prob_up_std,
+        'test_label_distribution': {
+            'n_total': n_total,
+            'n_label_0': n_label_0,
+            'n_label_1': n_label_1,
+            'pct_label_0': float(n_label_0 / n_total * 100),
+            'pct_label_1': float(n_label_1 / n_total * 100)
+        },
+        'confusion_matrix': {
+            'true_0_pred_0': int(cm[0, 0]) if cm.shape[0] > 1 and cm.shape[1] > 0 else 0,
+            'true_0_pred_1': int(cm[0, 1]) if cm.shape[0] > 1 and cm.shape[1] > 1 else 0,
+            'true_1_pred_0': int(cm[1, 0]) if cm.shape[0] > 1 and cm.shape[1] > 1 else 0,
+            'true_1_pred_1': int(cm[1, 1]) if cm.shape[0] > 1 and cm.shape[1] > 1 else 0
+        }
+    }
+    
+    return diagnostics
 
 
 def save_predictions(
@@ -199,6 +275,54 @@ def evaluate_model(config: dict) -> Dict:
     probs, preds = predict(model, X_test, batch_size, device)
     
     metrics = compute_metrics(y_test, preds, probs)
+    baseline = compute_baseline_metrics(y_test)
+    diagnostics = compute_diagnostics(y_test, preds, probs)
+    
+    logger.info("=" * 60)
+    logger.info("Test Set Results")
+    logger.info("=" * 60)
+    
+    logger.info(f"Test label distribution:")
+    label_dist = diagnostics['test_label_distribution']
+    logger.info(f"  label=0: {label_dist['n_label_0']} ({label_dist['pct_label_0']:.2f}%)")
+    logger.info(f"  label=1: {label_dist['n_label_1']} ({label_dist['pct_label_1']:.2f}%)")
+    
+    logger.info(f"Test prediction counts:")
+    logger.info(f"  pred_0_count: {diagnostics['test_pred_0_count']}")
+    logger.info(f"  pred_1_count: {diagnostics['test_pred_1_count']}")
+    
+    logger.info(f"Test prob_up statistics:")
+    logger.info(f"  mean: {diagnostics['test_prob_up_mean']:.4f}")
+    logger.info(f"  std: {diagnostics['test_prob_up_std']:.4f}")
+    
+    cm_dict = diagnostics['confusion_matrix']
+    logger.info(f"Confusion Matrix:")
+    logger.info(f"  True 0, Pred 0: {cm_dict['true_0_pred_0']}")
+    logger.info(f"  True 0, Pred 1: {cm_dict['true_0_pred_1']}")
+    logger.info(f"  True 1, Pred 0: {cm_dict['true_1_pred_0']}")
+    logger.info(f"  True 1, Pred 1: {cm_dict['true_1_pred_1']}")
+    
+    logger.info("=" * 60)
+    logger.info("Baseline Comparison")
+    logger.info("=" * 60)
+    
+    logger.info(f"Model accuracy: {metrics['accuracy']:.4f}")
+    logger.info(f"Always-0 accuracy: {baseline['always_predict_0_accuracy']:.4f}")
+    logger.info(f"Always-1 accuracy: {baseline['always_predict_1_accuracy']:.4f}")
+    logger.info(f"Majority baseline accuracy (class {baseline['majority_class']}): {baseline['majority_class_accuracy']:.4f}")
+    
+    if metrics['roc_auc'] is not None:
+        logger.info(f"Model ROC AUC: {metrics['roc_auc']:.4f}")
+    else:
+        logger.info("Model ROC AUC: N/A")
+    
+    if metrics['accuracy'] <= baseline['majority_class_accuracy']:
+        warnings.warn("Model does not outperform majority baseline.")
+    
+    logger.info("=" * 60)
+    
+    if diagnostics['collapsed_prediction']:
+        warnings.warn("Model predicts only one class. Results are not meaningful for LRP or clustering.")
     
     logger.info(f"Test Accuracy: {metrics['accuracy']:.4f}")
     logger.info(f"Test Precision: {metrics['precision']:.4f}")
@@ -212,8 +336,15 @@ def evaluate_model(config: dict) -> Dict:
     reports_dir = Path('outputs/reports')
     ensure_dir(str(reports_dir))
     
-    save_json(metrics, str(reports_dir / 'metrics.json'))
+    metrics_with_diagnostics = {**metrics, **diagnostics}
+    save_json(metrics_with_diagnostics, str(reports_dir / 'metrics.json'))
     logger.info(f"Saved metrics to {reports_dir / 'metrics.json'}")
+    
+    save_json(baseline, str(reports_dir / 'baseline_metrics.json'))
+    logger.info(f"Saved baseline metrics to {reports_dir / 'baseline_metrics.json'}")
+    
+    save_json(diagnostics, str(reports_dir / 'prediction_diagnostics.json'))
+    logger.info(f"Saved prediction diagnostics to {reports_dir / 'prediction_diagnostics.json'}")
     
     save_predictions(
         dates_test, y_test, preds, probs, future_returns_test,
