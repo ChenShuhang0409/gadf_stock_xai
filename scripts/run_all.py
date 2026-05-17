@@ -43,7 +43,15 @@ def main(config_path: str):
     
     print_step(5, "Train SimpleCNN")
     train_result = train_model(config)
-    logger.info(f"Training completed. Best val accuracy: {train_result['best_val_accuracy']:.4f}")
+    
+    best_name = train_result.get("best_metric_name", "unknown_metric")
+    best_value = train_result.get("best_metric_value", None)
+    best_epoch = train_result.get("epoch", train_result.get("best_epoch", None))
+    
+    if best_value is not None:
+        logger.info(f"Training completed. Best {best_name}: {best_value:.4f} at epoch {best_epoch}")
+    else:
+        logger.info("Training completed.")
     
     print_step(6, "Evaluate on test set")
     metrics = evaluate_model(config)

@@ -395,6 +395,7 @@ def train_model(config: dict) -> Dict:
     logger.info(f"Save metric: {save_metric}")
     
     best_metric_value = float('inf') if 'loss' in save_metric else float('-inf')
+    best_epoch = 0
     history = []
     
     for epoch in range(1, epochs + 1):
@@ -465,6 +466,7 @@ def train_model(config: dict) -> Dict:
         
         if is_better:
             best_metric_value = current_metric_value
+            best_epoch = epoch
             save_checkpoint(
                 model, config, save_metric, best_metric_value, epoch,
                 models_dir / 'best_model.pt'
@@ -472,10 +474,12 @@ def train_model(config: dict) -> Dict:
     
     save_train_history(history, reports_dir / 'train_history.csv')
     
-    logger.info(f"Training completed. Best {save_metric}: {best_metric_value:.4f}")
+    logger.info(f"Training completed. Best {save_metric}: {best_metric_value:.4f} at epoch {best_epoch}")
     
     return {
+        'best_metric_name': save_metric,
         'best_metric_value': best_metric_value,
+        'epoch': best_epoch,
         'save_metric': save_metric,
         'final_epoch': epochs,
         'history': history,
