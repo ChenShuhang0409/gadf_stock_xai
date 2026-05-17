@@ -59,6 +59,19 @@ def get_split_indices(dates: np.ndarray, config: dict) -> Tuple[np.ndarray, np.n
 
 
 def compute_input_stats(X: np.ndarray, split_name: str) -> Dict:
+    if len(X) == 0:
+        return {
+            'shape': [0],
+            'mean': None,
+            'std': None,
+            'min': None,
+            'max': None,
+            'nan_count': 0,
+            'inf_count': 0,
+            'per_channel': [],
+            'empty': True
+        }
+    
     stats = {
         'shape': list(X.shape),
         'mean': float(np.mean(X)),
@@ -103,6 +116,10 @@ def print_and_save_input_stats(
         stats = compute_input_stats(X_split, name)
         input_stats[name] = stats
         
+        if stats.get('empty', False):
+            logger.info(f"{name.upper()} X_img stats: EMPTY (no samples)")
+            continue
+        
         logger.info(f"{name.upper()} X_img stats:")
         logger.info(f"  shape: {stats['shape']}")
         logger.info(f"  mean: {stats['mean']:.6f}")
@@ -137,6 +154,18 @@ def print_and_save_input_stats(
 
 def print_label_distribution(y: np.ndarray, split_name: str) -> Dict:
     n_total = len(y)
+    
+    if n_total == 0:
+        logger.info(f"{split_name} label distribution: EMPTY (no samples)")
+        return {
+            'n_total': 0,
+            'n_label_0': 0,
+            'n_label_1': 0,
+            'pct_label_0': None,
+            'pct_label_1': None,
+            'empty': True
+        }
+    
     n_label_0 = int(np.sum(y == 0))
     n_label_1 = int(np.sum(y == 1))
     pct_0 = n_label_0 / n_total * 100

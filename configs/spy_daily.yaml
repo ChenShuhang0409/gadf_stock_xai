@@ -19,7 +19,8 @@ features:
 label:
   method: "future_average_close"
   horizon: 5
-  threshold: 0.0
+  threshold: 0.002
+  neutral_policy: "drop"
 
 dataset:
   window_size: 64

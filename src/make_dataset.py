@@ -14,6 +14,7 @@ def compute_labels(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     
     horizon = config['label']['horizon']
     threshold = config['label']['threshold']
+    neutral_policy = config['label'].get('neutral_policy', 'drop')
     
     future_closes = []
     for i in range(1, horizon + 1):
@@ -23,9 +24,29 @@ def compute_labels(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     
     df['future_avg_close'] = future_avg_close
     df['label_return'] = future_avg_close / df['close'] - 1
-    df['label'] = (df['label_return'] > threshold).astype(int)
     
-    logger.info(f"Label distribution: {df['label'].value_counts().to_dict()}")
+    def assign_label(row):
+        ret = row['label_return']
+        if pd.isna(ret):
+            return -1
+        if ret > threshold:
+            return 1
+        elif ret < -threshold:
+            return 0
+        else:
+            return -1
+    
+    df['label'] = df.apply(assign_label, axis=1)
+    
+    n_up = int((df['label'] == 1).sum())
+    n_down = int((df['label'] == 0).sum())
+    n_neutral = int((df['label'] == -1).sum())
+    n_total = len(df)
+    
+    logger.info(f"Label distribution before filtering:")
+    logger.info(f"  label=1 (up): {n_up} ({n_up/n_total*100:.2f}%)")
+    logger.info(f"  label=0 (down): {n_down} ({n_down/n_total*100:.2f}%)")
+    logger.info(f"  label=-1 (neutral): {n_neutral} ({n_neutral/n_total*100:.2f}%)")
     
     return df
 
@@ -33,6 +54,7 @@ def compute_labels(df: pd.DataFrame, config: dict) -> pd.DataFrame:
 def create_sliding_windows(df: pd.DataFrame, config: dict):
     window_size = config['dataset']['window_size']
     feature_names = config['features']['names']
+    neutral_policy = config['label'].get('neutral_policy', 'drop')
     
     X_ts_list = []
     y_list = []
@@ -43,8 +65,18 @@ def create_sliding_windows(df: pd.DataFrame, config: dict):
         if i + window_size >= len(df):
             break
         
-        if pd.isna(df.iloc[i + window_size]['label']):
+        label = df.iloc[i + window_size]['label']
+        
+        if pd.isna(label):
             continue
+        
+        if label == -1:
+            if neutral_policy == 'drop':
+                continue
+            elif neutral_policy == 'keep_as_0':
+                label = 0
+            else:
+                continue
         
         window_data = df.iloc[i:i + window_size][feature_names].values
         
@@ -52,19 +84,16 @@ def create_sliding_windows(df: pd.DataFrame, config: dict):
             continue
         
         X_ts_list.append(window_data.T)
-        
-        y_list.append(df.iloc[i + window_size]['label'])
-        
+        y_list.append(int(label))
         dates_list.append(df.iloc[i + window_size]['date'])
-        
         future_returns_list.append(df.iloc[i + window_size]['label_return'])
     
     X_ts = np.array(X_ts_list)
-    y = np.array(y_list)
+    y = np.array(y_list, dtype=np.int64)
     dates = np.array(dates_list)
     future_returns = np.array(future_returns_list)
     
-    logger.info(f"Created {len(X_ts)} samples")
+    logger.info(f"Created {len(X_ts)} samples after neutral filtering")
     logger.info(f"X_ts shape: {X_ts.shape}")
     logger.info(f"y shape: {y.shape}")
     
@@ -91,7 +120,16 @@ def split_by_date(dates: np.ndarray, config: dict):
 def build_dataset(df: pd.DataFrame, config: dict) -> dict:
     logger.info("Building dataset...")
     
+    threshold = config['label']['threshold']
+    horizon = config['label']['horizon']
+    neutral_policy = config['label'].get('neutral_policy', 'drop')
+    
     df = compute_labels(df, config)
+    
+    total_before_filter = len(df)
+    n_up_before = int((df['label'] == 1).sum())
+    n_down_before = int((df['label'] == 0).sum())
+    n_neutral_before = int((df['label'] == -1).sum())
     
     X_ts, y, dates, future_returns = create_sliding_windows(df, config)
     
@@ -107,9 +145,9 @@ def build_dataset(df: pd.DataFrame, config: dict) -> dict:
         'test_idx': test_idx
     }
     
-    logger.info(f"Train samples: {train_idx.sum()}")
-    logger.info(f"Val samples: {val_idx.sum()}")
-    logger.info(f"Test samples: {test_idx.sum()}")
+    logger.info(f"Train samples: {int(train_idx.sum())}")
+    logger.info(f"Val samples: {int(val_idx.sum())}")
+    logger.info(f"Test samples: {int(test_idx.sum())}")
     
     processed_dir = Path('data/processed')
     ensure_dir(str(processed_dir))
@@ -131,5 +169,33 @@ def build_dataset(df: pd.DataFrame, config: dict) -> dict:
         'window_size': config['dataset']['window_size']
     }
     save_json(stats, str(processed_dir / 'dataset_stats.json'))
+    
+    reports_dir = Path('outputs/reports')
+    ensure_dir(str(reports_dir))
+    
+    total_after_filter = len(y)
+    pct_dropped = (total_before_filter - total_after_filter) / total_before_filter * 100 if total_before_filter > 0 else 0
+    
+    label_filtering_stats = {
+        'threshold': float(threshold),
+        'horizon': int(horizon),
+        'neutral_policy': neutral_policy,
+        'total_before_filter': int(total_before_filter),
+        'n_up_before_filter': n_up_before,
+        'n_down_before_filter': n_down_before,
+        'n_neutral_before_filter': n_neutral_before,
+        'total_after_filter': int(total_after_filter),
+        'pct_dropped': float(pct_dropped)
+    }
+    save_json(label_filtering_stats, str(reports_dir / 'label_filtering_stats.json'))
+    
+    logger.info(f"Label filtering stats:")
+    logger.info(f"  threshold: {threshold}")
+    logger.info(f"  horizon: {horizon}")
+    logger.info(f"  neutral_policy: {neutral_policy}")
+    logger.info(f"  total_before_filter: {total_before_filter}")
+    logger.info(f"  n_up: {n_up_before}, n_down: {n_down_before}, n_neutral: {n_neutral_before}")
+    logger.info(f"  total_after_filter: {total_after_filter}")
+    logger.info(f"  pct_dropped: {pct_dropped:.2f}%")
     
     return data_dict
