@@ -10,6 +10,9 @@ from src.data_downloader import load_data_from_csv
 from src.indicators import add_indicators
 from src.make_dataset import build_dataset
 from src.gadf_encoder import encode_gadf
+from src.train import train_model
+from src.evaluate import evaluate_model
+from src.visualization import visualize_results
 
 
 def main(config_path: str):
@@ -39,8 +42,14 @@ def main(config_path: str):
     logger.info(f"GADF images shape: {X_img.shape}")
     
     print_step(5, "Train SimpleCNN")
+    train_result = train_model(config)
+    logger.info(f"Training completed. Best val accuracy: {train_result['best_val_accuracy']:.4f}")
     
     print_step(6, "Evaluate on test set")
+    metrics = evaluate_model(config)
+    logger.info(f"Evaluation completed. Test accuracy: {metrics['accuracy']:.4f}")
+    
+    visualize_results(config)
     
     print_step(7, "Generate LRP heatmaps")
     
