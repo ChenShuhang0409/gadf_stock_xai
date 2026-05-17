@@ -25,7 +25,8 @@ logger = setup_logger()
 
 
 def load_model(checkpoint_path: Path, device: torch.device) -> Tuple[torch.nn.Module, dict]:
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    logger.info(f"Loading trusted local checkpoint from {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint['config']
     
     model = get_model(config)
@@ -33,10 +34,15 @@ def load_model(checkpoint_path: Path, device: torch.device) -> Tuple[torch.nn.Mo
     model = model.to(device)
     model.eval()
     
-    logger.info(f"Loaded model from {checkpoint_path}")
-    logger.info(f"Model name: {checkpoint.get('model_name', 'unknown')}")
-    logger.info(f"Model was trained for {checkpoint['epoch']} epochs")
-    logger.info(f"Best metric: {checkpoint.get('best_metric_name', 'unknown')}={checkpoint.get('best_metric_value', 'unknown'):.4f}")
+    model_name = checkpoint.get('model_name', 'unknown')
+    best_metric_name = checkpoint.get('best_metric_name', 'unknown')
+    best_metric_value = checkpoint.get('best_metric_value', None)
+    epoch = checkpoint.get('epoch', None)
+    
+    logger.info(f"Loaded model: {model_name}")
+    logger.info(f"Model was trained for {epoch} epochs")
+    if best_metric_value is not None:
+        logger.info(f"Best metric: {best_metric_name}={float(best_metric_value):.4f}")
     
     return model, config
 

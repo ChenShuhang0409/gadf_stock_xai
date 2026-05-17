@@ -314,13 +314,14 @@ def save_checkpoint(
     epoch: int,
     save_path: Path
 ):
+    model_name = str(config['model'].get('name', 'simple_cnn'))
     checkpoint = {
         'model_state_dict': model.state_dict(),
         'config': config,
-        'model_name': config['model'].get('name', 'simple_cnn'),
-        'best_metric_name': metric_name,
-        'best_metric_value': metric_value,
-        'epoch': epoch
+        'model_name': model_name,
+        'best_metric_name': str(metric_name),
+        'best_metric_value': float(metric_value),
+        'epoch': int(epoch)
     }
     torch.save(checkpoint, save_path)
     logger.info(f"Saved checkpoint to {save_path} ({metric_name}={metric_value:.4f})")
