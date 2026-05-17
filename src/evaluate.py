@@ -56,10 +56,14 @@ def load_data_by_split(config: dict, split: str) -> Tuple[np.ndarray, np.ndarray
     dates = np.load(processed_dir / 'dates.npy', allow_pickle=True)
     future_returns = np.load(processed_dir / 'future_returns.npy')
     
-    assets = None
+    groups = None
+    tickers_path = processed_dir / 'tickers.npy'
     assets_path = processed_dir / 'assets.npy'
-    if assets_path.exists():
-        assets = np.load(assets_path, allow_pickle=True)
+    
+    if tickers_path.exists():
+        groups = np.load(tickers_path, allow_pickle=True)
+    elif assets_path.exists():
+        groups = np.load(assets_path, allow_pickle=True)
     
     split_start = pd.Timestamp(config['split'][f'{split}_start'])
     split_end = pd.Timestamp(config['split'][f'{split}_end'])
@@ -74,15 +78,15 @@ def load_data_by_split(config: dict, split: str) -> Tuple[np.ndarray, np.ndarray
     y_split = y[split_idx]
     dates_split = dates[split_idx]
     future_returns_split = future_returns[split_idx]
-    assets_split = assets[split_idx] if assets is not None else None
+    groups_split = groups[split_idx] if groups is not None else None
     
-    return X_split, y_split, dates_split, future_returns_split, assets_split
+    return X_split, y_split, dates_split, future_returns_split, groups_split
 
 
 def load_test_data(config: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    X_test, y_test, dates_test, future_returns_test, assets_test = load_data_by_split(config, 'test')
+    X_test, y_test, dates_test, future_returns_test, groups_test = load_data_by_split(config, 'test')
     logger.info(f"Test samples: {len(X_test)}")
-    return X_test, y_test, dates_test, future_returns_test, assets_test
+    return X_test, y_test, dates_test, future_returns_test, groups_test
 
 
 def predict(
@@ -336,6 +340,62 @@ def compute_per_asset_metrics(
     return per_asset_results
 
 
+def compute_per_ticker_metrics(
+    tickers: np.ndarray,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    probs: np.ndarray
+) -> List[Dict]:
+    unique_tickers = np.unique(tickers)
+    per_ticker_results = []
+    
+    for ticker_name in unique_tickers:
+        ticker_mask = tickers == ticker_name
+        
+        y_true_ticker = y_true[ticker_mask]
+        y_pred_ticker = y_pred[ticker_mask]
+        probs_ticker = probs[ticker_mask]
+        
+        n_test = len(y_true_ticker)
+        n_label_0 = int(np.sum(y_true_ticker == 0))
+        n_label_1 = int(np.sum(y_true_ticker == 1))
+        pred_0_count = int(np.sum(y_pred_ticker == 0))
+        pred_1_count = int(np.sum(y_pred_ticker == 1))
+        
+        accuracy = accuracy_score(y_true_ticker, y_pred_ticker)
+        
+        majority_baseline = max(n_label_0, n_label_1) / n_test if n_test > 0 else 0
+        
+        try:
+            if len(np.unique(y_true_ticker)) < 2:
+                roc_auc = float('nan')
+            else:
+                roc_auc = roc_auc_score(y_true_ticker, probs_ticker[:, 1])
+        except Exception:
+            roc_auc = float('nan')
+        
+        f1 = f1_score(y_true_ticker, y_pred_ticker, zero_division=0)
+        precision = precision_score(y_true_ticker, y_pred_ticker, zero_division=0)
+        recall = recall_score(y_true_ticker, y_pred_ticker, zero_division=0)
+        
+        per_ticker_results.append({
+            'ticker': ticker_name,
+            'n_test': n_test,
+            'accuracy': accuracy,
+            'majority_baseline_accuracy': majority_baseline,
+            'roc_auc': roc_auc,
+            'f1': f1,
+            'precision': precision,
+            'recall': recall,
+            'pred_0_count': pred_0_count,
+            'pred_1_count': pred_1_count,
+            'label_0_count': n_label_0,
+            'label_1_count': n_label_1
+        })
+    
+    return per_ticker_results
+
+
 def save_predictions(
     dates: np.ndarray,
     y_true: np.ndarray,
@@ -343,7 +403,8 @@ def save_predictions(
     probs: np.ndarray,
     future_returns: np.ndarray,
     save_path: Path,
-    assets: np.ndarray = None
+    groups: np.ndarray = None,
+    group_col: str = None
 ):
     df = pd.DataFrame({
         'date': dates,
@@ -354,9 +415,10 @@ def save_predictions(
         'future_return': future_returns
     })
     
-    if assets is not None:
-        df['asset'] = assets
-        df = df[['asset', 'date', 'y_true', 'y_pred', 'prob_down', 'prob_up', 'future_return']]
+    if groups is not None and group_col is not None:
+        df[group_col] = groups
+        cols = [group_col, 'date', 'y_true', 'y_pred', 'prob_down', 'prob_up', 'future_return']
+        df = df[cols]
     
     df.to_csv(save_path, index=False)
     logger.info(f"Saved predictions to {save_path}")
@@ -409,7 +471,17 @@ def evaluate_model(config: dict) -> Dict:
     
     batch_size = config['model']['batch_size']
     
-    X_val, y_val, _, _, assets_val = load_data_by_split(config, 'val')
+    processed_dir = Path('data/processed')
+    tickers_path = processed_dir / 'tickers.npy'
+    assets_path = processed_dir / 'assets.npy'
+    
+    group_col = None
+    if tickers_path.exists():
+        group_col = 'ticker'
+    elif assets_path.exists():
+        group_col = 'asset'
+    
+    X_val, y_val, _, _, groups_val = load_data_by_split(config, 'val')
     logger.info(f"Val samples for threshold optimization: {len(X_val)}")
     
     val_probs, _ = predict(model, X_val, batch_size, device)
@@ -418,7 +490,7 @@ def evaluate_model(config: dict) -> Dict:
     logger.info(f"Best decision threshold from validation: {best_threshold:.2f}")
     logger.info(f"Val balanced accuracy with best threshold: {val_metrics['balanced_accuracy']:.4f}")
     
-    X_test, y_test, dates_test, future_returns_test, assets_test = load_test_data(config)
+    X_test, y_test, dates_test, future_returns_test, groups_test = load_test_data(config)
     
     probs, preds_default = predict(model, X_test, batch_size, device)
     
@@ -496,25 +568,50 @@ def evaluate_model(config: dict) -> Dict:
     reports_dir = Path('outputs/reports')
     ensure_dir(str(reports_dir))
     
-    if assets_test is not None:
-        logger.info("=" * 60)
-        logger.info("Per-Asset Metrics")
-        logger.info("=" * 60)
-        
-        per_asset_metrics = compute_per_asset_metrics(
-            assets_test, y_test, preds_with_threshold, probs
-        )
-        
-        per_asset_df = pd.DataFrame(per_asset_metrics)
-        per_asset_df.to_csv(reports_dir / 'per_asset_metrics.csv', index=False)
-        logger.info(f"Saved per-asset metrics to {reports_dir / 'per_asset_metrics.csv'}")
-        
-        for row in per_asset_metrics:
-            logger.info(
-                f"  {row['asset']}: n={row['n_test']}, acc={row['accuracy']:.4f}, "
-                f"auc={row['roc_auc']:.4f if row['roc_auc'] is not None and not pd.isna(row['roc_auc']) else 'N/A'}, "
-                f"f1={row['f1']:.4f}"
+    if groups_test is not None and group_col is not None:
+        if group_col == 'ticker':
+            logger.info("=" * 60)
+            logger.info("Per-Ticker Metrics")
+            logger.info("=" * 60)
+            
+            per_ticker_metrics = compute_per_ticker_metrics(
+                groups_test, y_test, preds_with_threshold, probs
             )
+            
+            per_ticker_df = pd.DataFrame(per_ticker_metrics)
+            per_ticker_df.to_csv(reports_dir / 'per_ticker_metrics.csv', index=False)
+            logger.info(f"Saved per-ticker metrics to {reports_dir / 'per_ticker_metrics.csv'}")
+            
+            n_tickers = len(per_ticker_metrics)
+            logger.info(f"Total tickers: {n_tickers}")
+            
+            for row in per_ticker_metrics[:10]:
+                auc_str = f"{row['roc_auc']:.4f}" if not pd.isna(row['roc_auc']) else 'N/A'
+                logger.info(
+                    f"  {row['ticker']}: n={row['n_test']}, acc={row['accuracy']:.4f}, "
+                    f"auc={auc_str}, f1={row['f1']:.4f}"
+                )
+            if n_tickers > 10:
+                logger.info(f"  ... and {n_tickers - 10} more tickers")
+        else:
+            logger.info("=" * 60)
+            logger.info("Per-Asset Metrics")
+            logger.info("=" * 60)
+            
+            per_asset_metrics = compute_per_asset_metrics(
+                groups_test, y_test, preds_with_threshold, probs
+            )
+            
+            per_asset_df = pd.DataFrame(per_asset_metrics)
+            per_asset_df.to_csv(reports_dir / 'per_asset_metrics.csv', index=False)
+            logger.info(f"Saved per-asset metrics to {reports_dir / 'per_asset_metrics.csv'}")
+            
+            for row in per_asset_metrics:
+                auc_str = f"{row['roc_auc']:.4f}" if row['roc_auc'] is not None and not pd.isna(row['roc_auc']) else 'N/A'
+                logger.info(
+                    f"  {row['asset']}: n={row['n_test']}, acc={row['accuracy']:.4f}, "
+                    f"auc={auc_str}, f1={row['f1']:.4f}"
+                )
     
     decision_threshold_info = {
         'best_decision_threshold': float(best_threshold),
@@ -539,7 +636,8 @@ def evaluate_model(config: dict) -> Dict:
     save_predictions(
         dates_test, y_test, preds_with_threshold, probs, future_returns_test,
         reports_dir / 'predictions.csv',
-        assets=assets_test
+        groups=groups_test,
+        group_col=group_col
     )
     
     cm = np.array(metrics['confusion_matrix'])

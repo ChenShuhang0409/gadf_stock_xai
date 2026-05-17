@@ -1,0 +1,50 @@
+data:
+  mode: "multi_ticker"
+  csv_path: "/kaggle/input/datasets/camnugent/sandp500/all_stocks_5yr.csv"
+  ticker_col: "Name"
+  start_date: "2013-02-08"
+  end_date: "2018-02-07"
+
+features:
+  mode: "paper"
+  names:
+    - close
+    - volume
+    - RSI
+    - BIAS
+  rsi_period: 14
+  bias_period: 20
+
+label:
+  method: "future_average_close"
+  horizon: 5
+  threshold: 0.0
+  neutral_policy: "drop"
+
+dataset:
+  window_size: 64
+  image_size: 64
+
+split:
+  train_start: "2013-02-08"
+  train_end: "2016-12-31"
+  val_start: "2017-01-01"
+  val_end: "2017-06-30"
+  test_start: "2017-07-01"
+  test_end: "2018-02-07"
+
+model:
+  name: "paper_cnn"
+  in_channels: 4
+  num_classes: 2
+  batch_size: 64
+  epochs: 15
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  dropout: 0.3
+  use_class_weights: true
+  save_metric: "val_auc"
+
+runtime:
+  seed: 42
+  device: "auto"

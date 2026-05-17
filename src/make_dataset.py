@@ -18,22 +18,29 @@ def compute_labels(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     neutral_policy = config['label'].get('neutral_policy', 'drop')
     
     has_asset = 'asset' in df.columns
+    has_ticker = 'ticker' in df.columns
     
-    if has_asset:
+    group_col = None
+    if has_ticker:
+        group_col = 'ticker'
+    elif has_asset:
+        group_col = 'asset'
+    
+    if group_col:
         df_list = []
-        for asset_name, asset_df in df.groupby('asset'):
-            asset_df = asset_df.sort_values('date').reset_index(drop=True)
-            asset_df = asset_df.copy()
+        for group_name, group_df in df.groupby(group_col):
+            group_df = group_df.sort_values('date').reset_index(drop=True)
+            group_df = group_df.copy()
             
             future_closes = []
             for i in range(1, horizon + 1):
-                future_closes.append(asset_df['close'].shift(-i))
+                future_closes.append(group_df['close'].shift(-i))
             
             future_avg_close = pd.concat(future_closes, axis=1).mean(axis=1)
             
-            asset_df['future_avg_close'] = future_avg_close
-            asset_df['label_return'] = future_avg_close / asset_df['close'] - 1
-            df_list.append(asset_df)
+            group_df['future_avg_close'] = future_avg_close
+            group_df['label_return'] = future_avg_close / group_df['close'] - 1
+            df_list.append(group_df)
         
         df = pd.concat(df_list, ignore_index=True)
     else:
@@ -82,22 +89,29 @@ def create_sliding_windows(df: pd.DataFrame, config: dict):
     logger.info(f"Feature names: {feature_names}")
     
     has_asset = 'asset' in df.columns
+    has_ticker = 'ticker' in df.columns
+    
+    group_col = None
+    if has_ticker:
+        group_col = 'ticker'
+    elif has_asset:
+        group_col = 'asset'
     
     X_ts_list = []
     y_list = []
     dates_list = []
     future_returns_list = []
-    assets_list = []
+    groups_list = []
     
-    if has_asset:
-        for asset_name, asset_df in df.groupby('asset'):
-            asset_df = asset_df.sort_values('date').reset_index(drop=True)
+    if group_col:
+        for group_name, group_df in df.groupby(group_col):
+            group_df = group_df.sort_values('date').reset_index(drop=True)
             
-            for i in range(len(asset_df) - window_size):
-                if i + window_size >= len(asset_df):
+            for i in range(len(group_df) - window_size):
+                if i + window_size >= len(group_df):
                     break
                 
-                label = asset_df.iloc[i + window_size]['label']
+                label = group_df.iloc[i + window_size]['label']
                 
                 if pd.isna(label):
                     continue
@@ -110,16 +124,16 @@ def create_sliding_windows(df: pd.DataFrame, config: dict):
                     else:
                         continue
                 
-                window_data = asset_df.iloc[i:i + window_size][feature_names].values
+                window_data = group_df.iloc[i:i + window_size][feature_names].values
                 
                 if np.any(np.isnan(window_data)):
                     continue
                 
                 X_ts_list.append(window_data.T)
                 y_list.append(int(label))
-                dates_list.append(asset_df.iloc[i + window_size]['date'])
-                future_returns_list.append(asset_df.iloc[i + window_size]['label_return'])
-                assets_list.append(asset_name)
+                dates_list.append(group_df.iloc[i + window_size]['date'])
+                future_returns_list.append(group_df.iloc[i + window_size]['label_return'])
+                groups_list.append(group_name)
     else:
         for i in range(len(df) - window_size):
             if i + window_size >= len(df):
@@ -152,20 +166,19 @@ def create_sliding_windows(df: pd.DataFrame, config: dict):
     y = np.array(y_list, dtype=np.int64)
     dates = np.array(dates_list)
     future_returns = np.array(future_returns_list)
-    assets = np.array(assets_list) if assets_list else None
+    groups = np.array(groups_list) if groups_list else None
     
     logger.info(f"Created {len(X_ts)} samples after neutral filtering")
     logger.info(f"X_ts shape: {X_ts.shape}")
     logger.info(f"y shape: {y.shape}")
     
-    if assets is not None:
-        unique_assets = np.unique(assets)
-        logger.info(f"Assets in dataset: {unique_assets.tolist()}")
-        for asset in unique_assets:
-            count = np.sum(assets == asset)
-            logger.info(f"  {asset}: {count} samples")
+    if groups is not None:
+        unique_groups = np.unique(groups)
+        logger.info(f"{group_col.capitalize()}s in dataset: {len(unique_groups)}")
+        logger.info(f"  min samples per {group_col}: {min([np.sum(groups == g) for g in unique_groups])}")
+        logger.info(f"  max samples per {group_col}: {max([np.sum(groups == g) for g in unique_groups])}")
     
-    return X_ts, y, dates, future_returns, assets
+    return X_ts, y, dates, future_returns, groups
 
 
 def split_by_date(dates: np.ndarray, config: dict):
@@ -223,18 +236,25 @@ def build_dataset(df: pd.DataFrame, config: dict) -> dict:
     n_neutral_before = int((df['label'] == -1).sum())
     
     has_asset = 'asset' in df.columns
+    has_ticker = 'ticker' in df.columns
     
-    per_asset_stats = {}
-    if has_asset:
-        for asset_name, asset_df in df.groupby('asset'):
-            per_asset_stats[asset_name] = {
-                'total_before_filter': len(asset_df),
-                'n_up': int((asset_df['label'] == 1).sum()),
-                'n_down': int((asset_df['label'] == 0).sum()),
-                'n_neutral': int((asset_df['label'] == -1).sum())
+    group_col = None
+    if has_ticker:
+        group_col = 'ticker'
+    elif has_asset:
+        group_col = 'asset'
+    
+    per_group_stats = {}
+    if group_col:
+        for group_name, group_df in df.groupby(group_col):
+            per_group_stats[group_name] = {
+                'total_before_filter': len(group_df),
+                'n_up': int((group_df['label'] == 1).sum()),
+                'n_down': int((group_df['label'] == 0).sum()),
+                'n_neutral': int((group_df['label'] == -1).sum())
             }
     
-    X_ts, y, dates, future_returns, assets = create_sliding_windows(df, config)
+    X_ts, y, dates, future_returns, groups = create_sliding_windows(df, config)
     
     train_idx, val_idx, test_idx = split_by_date(dates, config)
     
@@ -243,7 +263,8 @@ def build_dataset(df: pd.DataFrame, config: dict) -> dict:
         'y': y,
         'dates': dates,
         'future_returns': future_returns,
-        'assets': assets,
+        'groups': groups,
+        'group_col': group_col,
         'train_idx': train_idx,
         'val_idx': val_idx,
         'test_idx': test_idx
@@ -260,8 +281,11 @@ def build_dataset(df: pd.DataFrame, config: dict) -> dict:
     np.save(processed_dir / 'y.npy', y)
     np.save(processed_dir / 'dates.npy', dates)
     np.save(processed_dir / 'future_returns.npy', future_returns)
-    if assets is not None:
-        np.save(processed_dir / 'assets.npy', assets)
+    if groups is not None:
+        if group_col == 'ticker':
+            np.save(processed_dir / 'tickers.npy', groups)
+        else:
+            np.save(processed_dir / 'assets.npy', groups)
     
     splits = []
     for i in range(len(dates)):
@@ -273,9 +297,10 @@ def build_dataset(df: pd.DataFrame, config: dict) -> dict:
         'future_return': future_returns,
         'split': splits
     })
-    if assets is not None:
-        metadata_df['asset'] = assets
-        metadata_df = metadata_df[['asset', 'date', 'y', 'future_return', 'split']]
+    if groups is not None:
+        metadata_df[group_col] = groups
+        cols = [group_col, 'date', 'y', 'future_return', 'split']
+        metadata_df = metadata_df[cols]
     
     metadata_df.to_csv(processed_dir / 'metadata.csv', index=False)
     logger.info(f"Saved metadata to {processed_dir / 'metadata.csv'}")
@@ -293,9 +318,9 @@ def build_dataset(df: pd.DataFrame, config: dict) -> dict:
         'data_mode': data_mode,
         'window_size': config['dataset']['window_size']
     }
-    if assets is not None:
-        stats['n_assets'] = len(np.unique(assets))
-        stats['assets'] = np.unique(assets).tolist()
+    if groups is not None:
+        stats['n_groups'] = len(np.unique(groups))
+        stats['group_col'] = group_col
     save_json(stats, str(processed_dir / 'dataset_stats.json'))
     
     reports_dir = Path('outputs/reports')
@@ -318,24 +343,24 @@ def build_dataset(df: pd.DataFrame, config: dict) -> dict:
         'pct_dropped': float(pct_dropped)
     }
     
-    if has_asset and assets is not None:
-        per_asset_after = {}
-        for asset_name in np.unique(assets):
-            asset_mask = assets == asset_name
-            per_asset_after[asset_name] = {
-                'total_after_filter': int(np.sum(asset_mask)),
-                'n_train': int(np.sum(asset_mask & train_idx)),
-                'n_val': int(np.sum(asset_mask & val_idx)),
-                'n_test': int(np.sum(asset_mask & test_idx)),
-                'n_label_0': int(np.sum((y == 0) & asset_mask)),
-                'n_label_1': int(np.sum((y == 1) & asset_mask))
+    if group_col and groups is not None:
+        per_group_after = {}
+        for group_name in np.unique(groups):
+            group_mask = groups == group_name
+            per_group_after[group_name] = {
+                'total_after_filter': int(np.sum(group_mask)),
+                'n_train': int(np.sum(group_mask & train_idx)),
+                'n_val': int(np.sum(group_mask & val_idx)),
+                'n_test': int(np.sum(group_mask & test_idx)),
+                'n_label_0': int(np.sum((y == 0) & group_mask)),
+                'n_label_1': int(np.sum((y == 1) & group_mask))
             }
         
-        label_filtering_stats['per_asset'] = {}
-        for asset_name in per_asset_stats:
-            label_filtering_stats['per_asset'][asset_name] = {
-                'before_filter': per_asset_stats.get(asset_name, {}),
-                'after_filter': per_asset_after.get(asset_name, {})
+        label_filtering_stats[f'per_{group_col}'] = {}
+        for group_name in per_group_stats:
+            label_filtering_stats[f'per_{group_col}'][group_name] = {
+                'before_filter': per_group_stats.get(group_name, {}),
+                'after_filter': per_group_after.get(group_name, {})
             }
     
     save_json(label_filtering_stats, str(reports_dir / 'label_filtering_stats.json'))

@@ -10,7 +10,7 @@ from src.utils import setup_logger
 logger = setup_logger()
 
 
-def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
+def standardize_columns(df: pd.DataFrame, ticker_col: str = None) -> pd.DataFrame:
     column_mapping = {
         'Date': 'date',
         'date': 'date',
@@ -31,10 +31,16 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
         'Symbol': 'ticker',
         'symbol': 'ticker',
         'Ticker': 'ticker',
-        'ticker': 'ticker'
+        'ticker': 'ticker',
+        'Name': 'ticker',
+        'name': 'ticker'
     }
     
     df.columns = [column_mapping.get(col, col) for col in df.columns]
+    
+    if ticker_col is not None and ticker_col.lower() != 'ticker':
+        if ticker_col in df.columns:
+            df = df.rename(columns={ticker_col: 'ticker'})
     
     return df
 
@@ -104,7 +110,14 @@ def validate_data(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     for col in ['open', 'high', 'low', 'close', 'volume']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     
-    df = df.sort_values(['asset', 'date'] if 'asset' in df.columns else 'date').reset_index(drop=True)
+    sort_cols = []
+    if 'asset' in df.columns:
+        sort_cols.append('asset')
+    if 'ticker' in df.columns:
+        sort_cols.append('ticker')
+    sort_cols.append('date')
+    
+    df = df.sort_values(sort_cols).reset_index(drop=True)
     
     start_date = pd.Timestamp(config['data']['start_date'])
     end_date = pd.Timestamp(config['data']['end_date'])
@@ -159,7 +172,7 @@ def load_single_ticker(config: dict) -> pd.DataFrame:
     
     df = load_and_filter_csv(actual_csv_path, ticker)
     
-    df['asset'] = ticker
+    df['ticker'] = ticker
     
     df = validate_data(df, config)
     
@@ -201,7 +214,7 @@ def load_multi_asset(config: dict) -> pd.DataFrame:
         logger.info(f"  File path: {actual_path}")
         
         df = load_and_filter_csv(actual_path, asset_name)
-        df['asset'] = asset_name
+        df['ticker'] = asset_name
         
         df['date'] = pd.to_datetime(df['date'])
         
@@ -223,14 +236,14 @@ def load_multi_asset(config: dict) -> pd.DataFrame:
     
     combined_df = pd.concat(all_dfs, ignore_index=True)
     
-    combined_df = combined_df.sort_values(['asset', 'date']).reset_index(drop=True)
+    combined_df = combined_df.sort_values(['ticker', 'date']).reset_index(drop=True)
     
     logger.info("=" * 60)
     logger.info("Multi-Asset Data Summary")
     logger.info("=" * 60)
     
     for asset_name in assets.keys():
-        asset_df = combined_df[combined_df['asset'] == asset_name]
+        asset_df = combined_df[combined_df['ticker'] == asset_name]
         if len(asset_df) > 0:
             logger.info(f"  {asset_name}: {len(asset_df)} rows, "
                        f"{asset_df['date'].min().date()} to {asset_df['date'].max().date()}")
@@ -239,6 +252,67 @@ def load_multi_asset(config: dict) -> pd.DataFrame:
     logger.info("=" * 60)
     
     return combined_df
+
+
+def load_multi_ticker(config: dict) -> pd.DataFrame:
+    csv_path = config['data']['csv_path']
+    ticker_col = config['data'].get('ticker_col', 'Name')
+    
+    logger.info(f"Loading multi-ticker data from: {csv_path}")
+    logger.info(f"Ticker column: {ticker_col}")
+    
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"Data file not found: {csv_path}")
+    
+    df = pd.read_csv(csv_path)
+    
+    logger.info(f"CSV columns: {df.columns.tolist()}")
+    logger.info(f"CSV shape: {df.shape}")
+    
+    df = standardize_columns(df, ticker_col)
+    
+    required_cols = ['date', 'open', 'high', 'low', 'close', 'volume', 'ticker']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}. Available columns: {df.columns.tolist()}")
+    
+    df['date'] = pd.to_datetime(df['date'])
+    
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    start_date = pd.Timestamp(config['data']['start_date'])
+    end_date = pd.Timestamp(config['data']['end_date'])
+    df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+    
+    initial_len = len(df)
+    df = df.dropna()
+    dropped = initial_len - len(df)
+    
+    if dropped > 0:
+        logger.info(f"Dropped {dropped} rows with NaN values")
+    
+    df = df.sort_values(['ticker', 'date']).reset_index(drop=True)
+    
+    unique_tickers = df['ticker'].unique()
+    n_tickers = len(unique_tickers)
+    
+    ticker_counts = df.groupby('ticker').size()
+    
+    logger.info("=" * 60)
+    logger.info("Multi-Ticker Data Summary")
+    logger.info("=" * 60)
+    logger.info(f"Number of tickers: {n_tickers}")
+    logger.info(f"Total rows: {len(df)}")
+    logger.info(f"Date range: {df['date'].min().date()} to {df['date'].max().date()}")
+    logger.info(f"Samples per ticker:")
+    logger.info(f"  min: {ticker_counts.min()}")
+    logger.info(f"  median: {ticker_counts.median():.0f}")
+    logger.info(f"  max: {ticker_counts.max()}")
+    logger.info("=" * 60)
+    
+    return df
 
 
 def load_data_from_csv(config: dict) -> pd.DataFrame:
@@ -250,5 +324,7 @@ def load_data_from_csv(config: dict) -> pd.DataFrame:
         return load_single_ticker(config)
     elif data_mode == 'multi_asset':
         return load_multi_asset(config)
+    elif data_mode == 'multi_ticker':
+        return load_multi_ticker(config)
     else:
-        raise ValueError(f"Unknown data mode: {data_mode}. Supported modes: 'single_ticker', 'multi_asset'")
+        raise ValueError(f"Unknown data mode: {data_mode}. Supported modes: 'single_ticker', 'multi_asset', 'multi_ticker'")

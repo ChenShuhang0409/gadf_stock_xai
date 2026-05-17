@@ -61,20 +61,27 @@ def add_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     feature_mode = config['features'].get('mode', 'current')
     
     has_asset = 'asset' in df.columns
+    has_ticker = 'ticker' in df.columns
     
-    if has_asset:
-        logger.info("Computing indicators per asset...")
+    group_col = None
+    if has_ticker:
+        group_col = 'ticker'
+    elif has_asset:
+        group_col = 'asset'
+    
+    if group_col:
+        logger.info(f"Computing indicators per {group_col}...")
         
         df_list = []
-        for asset_name, asset_df in df.groupby('asset'):
-            asset_df = asset_df.sort_values('date').reset_index(drop=True)
+        for group_name, group_df in df.groupby(group_col):
+            group_df = group_df.sort_values('date').reset_index(drop=True)
             
-            asset_df = compute_log_return_single(asset_df)
-            asset_df = compute_volume_change_single(asset_df)
-            asset_df = compute_rsi_single(asset_df, period=rsi_period)
-            asset_df = compute_bias_single(asset_df, period=bias_period)
+            group_df = compute_log_return_single(group_df)
+            group_df = compute_volume_change_single(group_df)
+            group_df = compute_rsi_single(group_df, period=rsi_period)
+            group_df = compute_bias_single(group_df, period=bias_period)
             
-            df_list.append(asset_df)
+            df_list.append(group_df)
         
         df = pd.concat(df_list, ignore_index=True)
     else:
@@ -95,6 +102,8 @@ def add_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     feature_names = get_feature_names(feature_mode)
     required_cols = ['date', 'open', 'high', 'low', 'close', 'volume',
                      'log_return', 'volume_change', 'RSI', 'BIAS']
+    if has_ticker:
+        required_cols.append('ticker')
     if has_asset:
         required_cols.append('asset')
     df = df[required_cols]

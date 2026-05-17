@@ -28,6 +28,7 @@ from src.evaluate import (
     compute_metrics,
     compute_baseline_metrics,
     compute_diagnostics,
+    compute_per_ticker_metrics,
     predict,
     find_best_threshold
 )
@@ -67,7 +68,8 @@ def run_single_experiment(
     y = data_dict['y']
     dates = data_dict['dates']
     future_returns = data_dict['future_returns']
-    assets = data_dict['assets']
+    groups = data_dict['groups']
+    group_col = data_dict['group_col']
     train_idx = data_dict['train_idx']
     val_idx = data_dict['val_idx']
     test_idx = data_dict['test_idx']
@@ -86,12 +88,12 @@ def run_single_experiment(
     
     logger.info(f"Train: {n_train}, Val: {n_val}, Test: {n_test}")
     
-    n_assets = 0
-    assets_list = []
-    if assets is not None:
-        n_assets = len(np.unique(assets))
-        assets_list = np.unique(assets).tolist()
-        logger.info(f"Assets: {assets_list}")
+    n_groups = 0
+    groups_list = []
+    if groups is not None:
+        n_groups = len(np.unique(groups))
+        groups_list = np.unique(groups).tolist()
+        logger.info(f"{group_col.capitalize()}s: {n_groups}")
     
     X_img = encode_gadf(X_ts, config)
     
@@ -155,7 +157,7 @@ def run_single_experiment(
         y_test = y[test_idx]
         dates_test = dates[test_idx]
         future_returns_test = future_returns[test_idx]
-        assets_test = assets[test_idx] if assets is not None else None
+        groups_test = groups[test_idx] if groups is not None else None
         
         probs, preds_default = predict(model, X_test, batch_size, device)
         
@@ -177,12 +179,20 @@ def run_single_experiment(
             model_accuracy=metrics['accuracy'],
             majority_baseline_accuracy=baseline['majority_class_accuracy']
         )
+        
+        if groups_test is not None and group_col == 'ticker':
+            per_ticker_metrics = compute_per_ticker_metrics(
+                groups_test, y_test, preds_with_threshold, probs
+            )
+            per_ticker_df = pd.DataFrame(per_ticker_metrics)
+            per_ticker_df.to_csv(exp_dir / 'per_ticker_metrics.csv', index=False)
+            logger.info(f"Saved per-ticker metrics to {exp_dir / 'per_ticker_metrics.csv'}")
     else:
         metrics = {'accuracy': None, 'balanced_accuracy': None, 'precision': None, 'recall': None, 'f1': None, 'roc_auc': None, 'decision_threshold': None}
         baseline = {'majority_class_accuracy': None}
         diagnostics = {'collapsed_prediction': None, 'ready_for_lrp': None, 'beats_majority_baseline': None}
         best_threshold = 0.5
-        assets_test = None
+        groups_test = None
     
     label_filtering_path = Path('outputs/reports/label_filtering_stats.json')
     if label_filtering_path.exists():
@@ -205,8 +215,8 @@ def run_single_experiment(
     
     result = {
         'data_mode': data_mode,
-        'n_assets': n_assets,
-        'assets': str(assets_list) if assets_list else None,
+        'n_tickers': n_groups if group_col == 'ticker' else None,
+        'n_assets': n_groups if group_col == 'asset' else None,
         'feature_mode': feature_mode,
         'horizon': horizon,
         'threshold': threshold,
@@ -244,7 +254,13 @@ def main(config_path: str, quick: bool = False):
     
     data_mode = config['data'].get('mode', 'single_ticker')
     
-    if quick:
+    if data_mode == 'multi_ticker':
+        feature_modes = ['current', 'paper']
+        horizons = [3, 5]
+        thresholds = [0.0, 0.002]
+        epochs = 15
+        logger.info("Running MULTI_TICKER mode (2x2x2=8 combinations, 15 epochs)")
+    elif quick:
         feature_modes = ['paper']
         horizons = [5, 10]
         thresholds = [0.0, 0.002]
@@ -328,6 +344,10 @@ def main(config_path: str, quick: bool = False):
         logger.info(f"Total experiments: {len(results)}")
         logger.info(f"Experiments ready for LRP: {ready_for_lrp_count}")
         
+        if data_mode == 'multi_ticker' and 'n_tickers' in df_results.columns:
+            n_tickers = df_results['n_tickers'].iloc[0] if not df_results['n_tickers'].isna().all() else 0
+            logger.info(f"Number of tickers: {n_tickers}")
+        
         if ready_for_lrp_count > 0:
             logger.info("\nBest configurations (ready for LRP):")
             best = df_results[df_results['ready_for_lrp'] == True].head(3)
@@ -335,7 +355,9 @@ def main(config_path: str, quick: bool = False):
                 logger.info(f"  feature={row['feature_mode']}, horizon={row['horizon']}, threshold={row['threshold']}: "
                            f"acc={row['test_accuracy']:.4f}, auc={row['roc_auc']:.4f}")
         else:
-            if data_mode == 'multi_asset':
+            if data_mode == 'multi_ticker':
+                logger.warning("\nNo multi_ticker configuration is ready for LRP.")
+            elif data_mode == 'multi_asset':
                 logger.warning("\nNo multi_asset configuration is ready for LRP.")
             else:
                 logger.warning("\nNo configuration beats majority baseline with AUC > 0.52")
