@@ -41,7 +41,8 @@ def main(config_path: str):
     X_img = encode_gadf(data_dict['X_ts'], config)
     logger.info(f"GADF images shape: {X_img.shape}")
     
-    print_step(5, "Train SimpleCNN")
+    model_name = config['model'].get('name', 'model')
+    print_step(5, f"Train {model_name}")
     train_result = train_model(config)
     
     best_name = train_result.get("best_metric_name", "unknown_metric")

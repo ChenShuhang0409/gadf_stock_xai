@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.indicators import get_feature_names
 from src.utils import ensure_dir, save_json, setup_logger
 
 logger = setup_logger()
@@ -53,8 +54,12 @@ def compute_labels(df: pd.DataFrame, config: dict) -> pd.DataFrame:
 
 def create_sliding_windows(df: pd.DataFrame, config: dict):
     window_size = config['dataset']['window_size']
-    feature_names = config['features']['names']
+    feature_mode = config['features'].get('mode', 'current')
+    feature_names = get_feature_names(feature_mode)
     neutral_policy = config['label'].get('neutral_policy', 'drop')
+    
+    logger.info(f"Using feature mode: {feature_mode}")
+    logger.info(f"Feature names: {feature_names}")
     
     X_ts_list = []
     y_list = []
@@ -123,6 +128,8 @@ def build_dataset(df: pd.DataFrame, config: dict) -> dict:
     threshold = config['label']['threshold']
     horizon = config['label']['horizon']
     neutral_policy = config['label'].get('neutral_policy', 'drop')
+    feature_mode = config['features'].get('mode', 'current')
+    feature_names = get_feature_names(feature_mode)
     
     df = compute_labels(df, config)
     
@@ -165,7 +172,8 @@ def build_dataset(df: pd.DataFrame, config: dict) -> dict:
         'val_samples': int(val_idx.sum()),
         'test_samples': int(test_idx.sum()),
         'X_ts_shape': list(X_ts.shape),
-        'feature_names': config['features']['names'],
+        'feature_mode': feature_mode,
+        'feature_names': feature_names,
         'window_size': config['dataset']['window_size']
     }
     save_json(stats, str(processed_dir / 'dataset_stats.json'))
@@ -180,6 +188,7 @@ def build_dataset(df: pd.DataFrame, config: dict) -> dict:
         'threshold': float(threshold),
         'horizon': int(horizon),
         'neutral_policy': neutral_policy,
+        'feature_mode': feature_mode,
         'total_before_filter': int(total_before_filter),
         'n_up_before_filter': n_up_before,
         'n_down_before_filter': n_down_before,
@@ -193,6 +202,7 @@ def build_dataset(df: pd.DataFrame, config: dict) -> dict:
     logger.info(f"  threshold: {threshold}")
     logger.info(f"  horizon: {horizon}")
     logger.info(f"  neutral_policy: {neutral_policy}")
+    logger.info(f"  feature_mode: {feature_mode}")
     logger.info(f"  total_before_filter: {total_before_filter}")
     logger.info(f"  n_up: {n_up_before}, n_down: {n_down_before}, n_neutral: {n_neutral_before}")
     logger.info(f"  total_after_filter: {total_after_filter}")

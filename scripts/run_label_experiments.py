@@ -13,7 +13,7 @@ import torch
 
 from src.utils import load_config, set_seed, get_device, ensure_dir, save_json, setup_logger
 from src.data_downloader import load_data_from_csv
-from src.indicators import add_indicators
+from src.indicators import add_indicators, get_feature_names
 from src.make_dataset import build_dataset
 from src.gadf_encoder import encode_gadf
 from src.models import get_model
@@ -28,7 +28,8 @@ from src.evaluate import (
     compute_metrics,
     compute_baseline_metrics,
     compute_diagnostics,
-    predict
+    predict,
+    find_best_threshold
 )
 
 logger = setup_logger()
@@ -37,6 +38,7 @@ logger = setup_logger()
 def run_single_experiment(
     df_features: pd.DataFrame,
     base_config: dict,
+    feature_mode: str,
     horizon: int,
     threshold: float,
     neutral_policy: str,
@@ -44,17 +46,18 @@ def run_single_experiment(
     epochs: int
 ) -> dict:
     config = copy.deepcopy(base_config)
+    config['features']['mode'] = feature_mode
     config['label']['horizon'] = horizon
     config['label']['threshold'] = threshold
     config['label']['neutral_policy'] = neutral_policy
     config['model']['epochs'] = epochs
     
-    exp_name = f"horizon_{horizon}_threshold_{str(threshold).replace('.', 'p')}"
+    exp_name = f"feature_{feature_mode}_horizon_{horizon}_threshold_{str(threshold).replace('.', 'p')}"
     exp_dir = experiment_dir / exp_name
     ensure_dir(str(exp_dir))
     
     logger.info("=" * 60)
-    logger.info(f"Experiment: horizon={horizon}, threshold={threshold}, neutral_policy={neutral_policy}")
+    logger.info(f"Experiment: feature_mode={feature_mode}, horizon={horizon}, threshold={threshold}")
     logger.info("=" * 60)
     
     data_dict = build_dataset(df_features, config)
@@ -144,19 +147,31 @@ def run_single_experiment(
         dates_test = dates[test_idx]
         future_returns_test = future_returns[test_idx]
         
-        probs, preds = predict(model, X_test, batch_size, device)
+        probs, preds_default = predict(model, X_test, batch_size, device)
         
-        metrics = compute_metrics(y_test, preds, probs)
+        X_val_data = X_img[val_idx]
+        y_val_data = y[val_idx]
+        val_probs, _ = predict(model, X_val_data, batch_size, device)
+        
+        best_threshold, val_thresh_metrics = find_best_threshold(y_val_data, val_probs)
+        
+        preds_with_threshold = (probs[:, 1] >= best_threshold).astype(int)
+        
+        metrics = compute_metrics(y_test, preds_with_threshold, probs)
+        metrics['decision_threshold'] = float(best_threshold)
+        
         baseline = compute_baseline_metrics(y_test)
+        
         diagnostics = compute_diagnostics(
-            y_test, preds, probs,
+            y_test, preds_with_threshold, probs,
             model_accuracy=metrics['accuracy'],
             majority_baseline_accuracy=baseline['majority_class_accuracy']
         )
     else:
-        metrics = {'accuracy': None, 'precision': None, 'recall': None, 'f1': None, 'roc_auc': None}
+        metrics = {'accuracy': None, 'balanced_accuracy': None, 'precision': None, 'recall': None, 'f1': None, 'roc_auc': None, 'decision_threshold': None}
         baseline = {'majority_class_accuracy': None}
-        diagnostics = {'collapsed_prediction': None, 'ready_for_lrp': None}
+        diagnostics = {'collapsed_prediction': None, 'ready_for_lrp': None, 'beats_majority_baseline': None}
+        best_threshold = 0.5
     
     label_filtering_path = Path('outputs/reports/label_filtering_stats.json')
     if label_filtering_path.exists():
@@ -173,7 +188,12 @@ def run_single_experiment(
         import shutil
         shutil.copy(str(label_filtering_path), str(exp_dir / 'label_filtering_stats.json'))
     
+    accuracy_minus_baseline = None
+    if metrics.get('accuracy') is not None and baseline.get('majority_class_accuracy') is not None:
+        accuracy_minus_baseline = metrics['accuracy'] - baseline['majority_class_accuracy']
+    
     result = {
+        'feature_mode': feature_mode,
         'horizon': horizon,
         'threshold': threshold,
         'neutral_policy': neutral_policy,
@@ -181,8 +201,11 @@ def run_single_experiment(
         'n_val': n_val,
         'n_test': n_test,
         'pct_dropped': pct_dropped,
+        'decision_threshold': float(best_threshold) if best_threshold is not None else None,
         'test_accuracy': metrics.get('accuracy'),
         'majority_baseline_accuracy': baseline.get('majority_class_accuracy'),
+        'accuracy_minus_baseline': accuracy_minus_baseline,
+        'balanced_accuracy': metrics.get('balanced_accuracy'),
         'beats_majority_baseline': diagnostics.get('beats_majority_baseline'),
         'roc_auc': metrics.get('roc_auc'),
         'f1': metrics.get('f1'),
@@ -206,11 +229,13 @@ def main(config_path: str, quick: bool = False):
     set_seed(config['runtime']['seed'])
     
     if quick:
-        horizons = [3, 5, 10]
+        feature_modes = ['paper']
+        horizons = [5, 10]
         thresholds = [0.0, 0.002]
         epochs = 8
         logger.info("Running in QUICK mode (reduced combinations, 8 epochs)")
     else:
+        feature_modes = ['current', 'paper']
         horizons = [1, 3, 5, 10]
         thresholds = [0.0, 0.001, 0.002, 0.005]
         epochs = 15
@@ -218,6 +243,7 @@ def main(config_path: str, quick: bool = False):
     
     neutral_policy = "drop"
     
+    logger.info(f"Feature modes: {feature_modes}")
     logger.info(f"Horizons: {horizons}")
     logger.info(f"Thresholds: {thresholds}")
     logger.info(f"Neutral policy: {neutral_policy}")
@@ -231,39 +257,43 @@ def main(config_path: str, quick: bool = False):
     
     results = []
     
-    total_combinations = len(horizons) * len(thresholds)
+    total_combinations = len(feature_modes) * len(horizons) * len(thresholds)
     current = 0
     
-    for horizon in horizons:
-        for threshold in thresholds:
-            current += 1
-            logger.info(f"\n{'='*60}")
-            logger.info(f"Progress: {current}/{total_combinations}")
-            logger.info(f"{'='*60}")
-            
-            try:
-                result = run_single_experiment(
-                    df_features,
-                    config,
-                    horizon,
-                    threshold,
-                    neutral_policy,
-                    experiment_dir,
-                    epochs
-                )
+    for feature_mode in feature_modes:
+        for horizon in horizons:
+            for threshold in thresholds:
+                current += 1
+                logger.info(f"\n{'='*60}")
+                logger.info(f"Progress: {current}/{total_combinations}")
+                logger.info(f"{'='*60}")
                 
-                if result is not None:
-                    results.append(result)
-            except Exception as e:
-                logger.error(f"Experiment failed: {e}")
-                continue
+                try:
+                    result = run_single_experiment(
+                        df_features,
+                        config,
+                        feature_mode,
+                        horizon,
+                        threshold,
+                        neutral_policy,
+                        experiment_dir,
+                        epochs
+                    )
+                    
+                    if result is not None:
+                        results.append(result)
+                except Exception as e:
+                    logger.error(f"Experiment failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
     
     if len(results) > 0:
         df_results = pd.DataFrame(results)
         
         df_results = df_results.sort_values(
-            by=['ready_for_lrp', 'roc_auc', 'test_accuracy'],
-            ascending=[False, False, False],
+            by=['ready_for_lrp', 'roc_auc', 'accuracy_minus_baseline', 'balanced_accuracy'],
+            ascending=[False, False, False, False],
             na_position='last'
         )
         
@@ -283,16 +313,16 @@ def main(config_path: str, quick: bool = False):
             logger.info("\nBest configurations (ready for LRP):")
             best = df_results[df_results['ready_for_lrp'] == True].head(3)
             for _, row in best.iterrows():
-                logger.info(f"  horizon={row['horizon']}, threshold={row['threshold']}: "
+                logger.info(f"  feature={row['feature_mode']}, horizon={row['horizon']}, threshold={row['threshold']}: "
                            f"acc={row['test_accuracy']:.4f}, auc={row['roc_auc']:.4f}")
         else:
             logger.warning("\nNo configuration beats majority baseline with AUC > 0.52")
             logger.info("\nTop configurations by AUC:")
-            best_auc = df_results.nlargest(3, 'roc_auc')
+            best_auc = df_results.nlargest(5, 'roc_auc')
             for _, row in best_auc.iterrows():
-                logger.info(f"  horizon={row['horizon']}, threshold={row['threshold']}: "
+                logger.info(f"  feature={row['feature_mode']}, horizon={row['horizon']}, threshold={row['threshold']}: "
                            f"acc={row['test_accuracy']:.4f}, auc={row['roc_auc']:.4f}, "
-                           f"beats_baseline={row['beats_majority_baseline']}")
+                           f"acc-baseline={row['accuracy_minus_baseline']:.4f if row['accuracy_minus_baseline'] is not None else 'N/A'}")
     else:
         logger.warning("No experiments completed successfully.")
     

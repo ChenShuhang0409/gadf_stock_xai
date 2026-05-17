@@ -8,9 +8,10 @@ data:
   interval: "1d"
 
 features:
+  mode: "paper"
   names:
-    - log_return
-    - volume_change
+    - close
+    - volume
     - RSI
     - BIAS
   rsi_period: 14

@@ -42,6 +42,15 @@ def compute_bias(df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
     return df
 
 
+def get_feature_names(mode: str) -> list:
+    if mode == 'current':
+        return ['log_return', 'volume_change', 'RSI', 'BIAS']
+    elif mode == 'paper':
+        return ['close', 'volume', 'RSI', 'BIAS']
+    else:
+        raise ValueError(f"Unknown feature mode: {mode}. Supported modes: 'current', 'paper'")
+
+
 def add_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     logger.info("Adding technical indicators...")
     
@@ -49,6 +58,7 @@ def add_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     
     rsi_period = config['features']['rsi_period']
     bias_period = config['features']['bias_period']
+    feature_mode = config['features'].get('mode', 'current')
     
     df = compute_log_return(df)
     df = compute_volume_change(df)
@@ -64,11 +74,13 @@ def add_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     if dropped > 0:
         logger.info(f"Dropped {dropped} rows with NaN values")
     
+    feature_names = get_feature_names(feature_mode)
     required_cols = ['date', 'open', 'high', 'low', 'close', 'volume',
                      'log_return', 'volume_change', 'RSI', 'BIAS']
     df = df[required_cols]
     
-    logger.info(f"Added indicators: {df.columns.tolist()}")
+    logger.info(f"Feature mode: {feature_mode}")
+    logger.info(f"Selected features: {feature_names}")
     logger.info(f"Final dataset shape: {df.shape}")
     
     return df

@@ -10,6 +10,7 @@ import pandas as pd
 import torch
 from sklearn.metrics import (
     accuracy_score,
+    balanced_accuracy_score,
     confusion_matrix,
     f1_score,
     precision_score,
@@ -47,7 +48,7 @@ def load_model(checkpoint_path: Path, device: torch.device) -> Tuple[torch.nn.Mo
     return model, config
 
 
-def load_test_data(config: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def load_data_by_split(config: dict, split: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     processed_dir = Path('data/processed')
     
     X_img = np.load(processed_dir / 'X_img.npy')
@@ -55,40 +56,44 @@ def load_test_data(config: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np
     dates = np.load(processed_dir / 'dates.npy', allow_pickle=True)
     future_returns = np.load(processed_dir / 'future_returns.npy')
     
-    test_start = pd.Timestamp(config['split']['test_start'])
-    test_end = pd.Timestamp(config['split']['test_end'])
+    split_start = pd.Timestamp(config['split'][f'{split}_start'])
+    split_end = pd.Timestamp(config['split'][f'{split}_end'])
     
     dates_pd = pd.to_datetime(dates)
-    test_idx = (dates_pd >= test_start) & (dates_pd <= test_end)
+    split_idx = (dates_pd >= split_start) & (dates_pd <= split_end)
     
-    if hasattr(test_idx, 'values'):
-        test_idx = test_idx.values
+    if hasattr(split_idx, 'values'):
+        split_idx = split_idx.values
     
-    X_test = X_img[test_idx]
-    y_test = y[test_idx]
-    dates_test = dates[test_idx]
-    future_returns_test = future_returns[test_idx]
+    X_split = X_img[split_idx]
+    y_split = y[split_idx]
+    dates_split = dates[split_idx]
+    future_returns_split = future_returns[split_idx]
     
+    return X_split, y_split, dates_split, future_returns_split
+
+
+def load_test_data(config: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    X_test, y_test, dates_test, future_returns_test = load_data_by_split(config, 'test')
     logger.info(f"Test samples: {len(X_test)}")
-    
     return X_test, y_test, dates_test, future_returns_test
 
 
 def predict(
     model: torch.nn.Module,
-    X_test: np.ndarray,
+    X: np.ndarray,
     batch_size: int,
     device: torch.device
 ) -> Tuple[np.ndarray, np.ndarray]:
-    X_tensor = torch.tensor(X_test, dtype=torch.float32)
-    test_dataset = TensorDataset(X_tensor)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    X_tensor = torch.tensor(X, dtype=torch.float32)
+    dataset = TensorDataset(X_tensor)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     
     all_probs = []
     all_preds = []
     
     with torch.no_grad():
-        for (X_batch,) in test_loader:
+        for (X_batch,) in loader:
             X_batch = X_batch.to(device)
             outputs = model(X_batch)
             probs = torch.softmax(outputs, dim=1)
@@ -103,9 +108,45 @@ def predict(
     return probs, preds
 
 
+def find_best_threshold(
+    y_true: np.ndarray,
+    probs: np.ndarray,
+    thresholds: np.ndarray = None
+) -> Tuple[float, Dict]:
+    if thresholds is None:
+        thresholds = np.arange(0.3, 0.71, 0.01)
+    
+    best_threshold = 0.5
+    best_balanced_acc = 0.0
+    best_metrics = {}
+    
+    for thresh in thresholds:
+        y_pred = (probs[:, 1] >= thresh).astype(int)
+        
+        acc = accuracy_score(y_true, y_pred)
+        bal_acc = balanced_accuracy_score(y_true, y_pred)
+        f1 = f1_score(y_true, y_pred, zero_division=0)
+        prec = precision_score(y_true, y_pred, zero_division=0)
+        rec = recall_score(y_true, y_pred, zero_division=0)
+        
+        if bal_acc > best_balanced_acc:
+            best_balanced_acc = bal_acc
+            best_threshold = thresh
+            best_metrics = {
+                'accuracy': acc,
+                'balanced_accuracy': bal_acc,
+                'f1': f1,
+                'precision': prec,
+                'recall': rec
+            }
+    
+    return best_threshold, best_metrics
+
+
 def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray) -> Dict:
     metrics = {
         'accuracy': accuracy_score(y_true, y_pred),
+        'balanced_accuracy': balanced_accuracy_score(y_true, y_pred),
         'precision': precision_score(y_true, y_pred, zero_division=0),
         'recall': recall_score(y_true, y_pred, zero_division=0),
         'f1': f1_score(y_true, y_pred, zero_division=0),
@@ -299,15 +340,30 @@ def evaluate_model(config: dict) -> Dict:
     
     model, model_config = load_model(checkpoint_path, device)
     
+    batch_size = config['model']['batch_size']
+    
+    X_val, y_val, _, _ = load_data_by_split(config, 'val')
+    logger.info(f"Val samples for threshold optimization: {len(X_val)}")
+    
+    val_probs, _ = predict(model, X_val, batch_size, device)
+    
+    best_threshold, val_metrics = find_best_threshold(y_val, val_probs)
+    logger.info(f"Best decision threshold from validation: {best_threshold:.2f}")
+    logger.info(f"Val balanced accuracy with best threshold: {val_metrics['balanced_accuracy']:.4f}")
+    
     X_test, y_test, dates_test, future_returns_test = load_test_data(config)
     
-    batch_size = config['model']['batch_size']
-    probs, preds = predict(model, X_test, batch_size, device)
+    probs, preds_default = predict(model, X_test, batch_size, device)
     
-    metrics = compute_metrics(y_test, preds, probs)
+    preds_with_threshold = (probs[:, 1] >= best_threshold).astype(int)
+    
+    metrics = compute_metrics(y_test, preds_with_threshold, probs)
+    metrics['decision_threshold'] = float(best_threshold)
+    
     baseline = compute_baseline_metrics(y_test)
+    
     diagnostics = compute_diagnostics(
-        y_test, preds, probs,
+        y_test, preds_with_threshold, probs,
         model_accuracy=metrics['accuracy'],
         majority_baseline_accuracy=baseline['majority_class_accuracy']
     )
@@ -316,6 +372,7 @@ def evaluate_model(config: dict) -> Dict:
     logger.info("Test Set Results")
     logger.info("=" * 60)
     
+    logger.info(f"Decision threshold: {best_threshold:.2f}")
     logger.info(f"Test label distribution:")
     label_dist = diagnostics['test_label_distribution']
     logger.info(f"  label=0: {label_dist['n_label_0']} ({label_dist['pct_label_0']:.2f}%)")
@@ -341,6 +398,7 @@ def evaluate_model(config: dict) -> Dict:
     logger.info("=" * 60)
     
     logger.info(f"Model accuracy: {metrics['accuracy']:.4f}")
+    logger.info(f"Balanced accuracy: {metrics['balanced_accuracy']:.4f}")
     logger.info(f"Always-0 accuracy: {baseline['always_predict_0_accuracy']:.4f}")
     logger.info(f"Always-1 accuracy: {baseline['always_predict_1_accuracy']:.4f}")
     logger.info(f"Majority baseline accuracy (class {baseline['majority_class']}): {baseline['majority_class_accuracy']:.4f}")
@@ -359,6 +417,7 @@ def evaluate_model(config: dict) -> Dict:
         warnings.warn("Model predicts only one class. Results are not meaningful for LRP or clustering.")
     
     logger.info(f"Test Accuracy: {metrics['accuracy']:.4f}")
+    logger.info(f"Test Balanced Accuracy: {metrics['balanced_accuracy']:.4f}")
     logger.info(f"Test Precision: {metrics['precision']:.4f}")
     logger.info(f"Test Recall: {metrics['recall']:.4f}")
     logger.info(f"Test F1: {metrics['f1']:.4f}")
@@ -369,6 +428,16 @@ def evaluate_model(config: dict) -> Dict:
     
     reports_dir = Path('outputs/reports')
     ensure_dir(str(reports_dir))
+    
+    decision_threshold_info = {
+        'best_decision_threshold': float(best_threshold),
+        'selection_metric': 'val_balanced_accuracy',
+        'val_balanced_accuracy': float(val_metrics['balanced_accuracy']),
+        'test_accuracy_with_threshold': float(metrics['accuracy']),
+        'test_balanced_accuracy_with_threshold': float(metrics['balanced_accuracy'])
+    }
+    save_json(decision_threshold_info, str(reports_dir / 'decision_threshold.json'))
+    logger.info(f"Saved decision threshold info to {reports_dir / 'decision_threshold.json'}")
     
     metrics_with_diagnostics = {**metrics, **diagnostics}
     save_json(metrics_with_diagnostics, str(reports_dir / 'metrics.json'))
@@ -381,7 +450,7 @@ def evaluate_model(config: dict) -> Dict:
     logger.info(f"Saved prediction diagnostics to {reports_dir / 'prediction_diagnostics.json'}")
     
     save_predictions(
-        dates_test, y_test, preds, probs, future_returns_test,
+        dates_test, y_test, preds_with_threshold, probs, future_returns_test,
         reports_dir / 'predictions.csv'
     )
     
