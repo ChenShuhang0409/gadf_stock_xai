@@ -1,8 +1,15 @@
 data:
-  mode: "single_ticker"
-  ticker: "SPY"
-  csv_path: "/kaggle/input/sp500-nasdaq-spy-qqq-ohlcv-data"
-  local_csv_path: "data/raw/SPY_1d.csv"
+  mode: "multi_asset"
+  assets:
+    SPY: "/kaggle/input/sp500-nasdaq-spy-qqq-ohlcv-data/SPY.csv"
+    QQQ: "/kaggle/input/sp500-nasdaq-spy-qqq-ohlcv-data/QQQ_split_adj.csv"
+    NASDAQ_100: "/kaggle/input/sp500-nasdaq-spy-qqq-ohlcv-data/NASDAQ_100.csv"
+    SP500: "/kaggle/input/sp500-nasdaq-spy-qqq-ohlcv-data/SP500.csv"
+  local_assets:
+    SPY: "data/raw/SPY_1d.csv"
+    QQQ: "data/raw/QQQ_1d.csv"
+    NASDAQ_100: "data/raw/NASDAQ_100_1d.csv"
+    SP500: "data/raw/SP500_1d.csv"
   start_date: "2010-01-01"
   end_date: "2024-12-31"
   interval: "1d"

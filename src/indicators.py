@@ -6,19 +6,19 @@ from src.utils import setup_logger
 logger = setup_logger()
 
 
-def compute_log_return(df: pd.DataFrame) -> pd.DataFrame:
+def compute_log_return_single(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df['log_return'] = np.log(df['close'] / df['close'].shift(1))
     return df
 
 
-def compute_volume_change(df: pd.DataFrame) -> pd.DataFrame:
+def compute_volume_change_single(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df['volume_change'] = df['volume'] / df['volume'].shift(1) - 1
     return df
 
 
-def compute_rsi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+def compute_rsi_single(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     df = df.copy()
     
     delta = df['close'].diff()
@@ -35,7 +35,7 @@ def compute_rsi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     return df
 
 
-def compute_bias(df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
+def compute_bias_single(df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
     df = df.copy()
     ma = df['close'].rolling(window=period, min_periods=period).mean()
     df['BIAS'] = (df['close'] - ma) / ma
@@ -60,10 +60,28 @@ def add_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     bias_period = config['features']['bias_period']
     feature_mode = config['features'].get('mode', 'current')
     
-    df = compute_log_return(df)
-    df = compute_volume_change(df)
-    df = compute_rsi(df, period=rsi_period)
-    df = compute_bias(df, period=bias_period)
+    has_asset = 'asset' in df.columns
+    
+    if has_asset:
+        logger.info("Computing indicators per asset...")
+        
+        df_list = []
+        for asset_name, asset_df in df.groupby('asset'):
+            asset_df = asset_df.sort_values('date').reset_index(drop=True)
+            
+            asset_df = compute_log_return_single(asset_df)
+            asset_df = compute_volume_change_single(asset_df)
+            asset_df = compute_rsi_single(asset_df, period=rsi_period)
+            asset_df = compute_bias_single(asset_df, period=bias_period)
+            
+            df_list.append(asset_df)
+        
+        df = pd.concat(df_list, ignore_index=True)
+    else:
+        df = compute_log_return_single(df)
+        df = compute_volume_change_single(df)
+        df = compute_rsi_single(df, period=rsi_period)
+        df = compute_bias_single(df, period=bias_period)
     
     df = df.replace([np.inf, -np.inf], np.nan)
     
@@ -77,6 +95,8 @@ def add_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     feature_names = get_feature_names(feature_mode)
     required_cols = ['date', 'open', 'high', 'low', 'close', 'volume',
                      'log_return', 'volume_change', 'RSI', 'BIAS']
+    if has_asset:
+        required_cols.append('asset')
     df = df[required_cols]
     
     logger.info(f"Feature mode: {feature_mode}")

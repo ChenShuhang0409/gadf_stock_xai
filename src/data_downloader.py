@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -70,7 +70,7 @@ def find_spy_csv_in_directory(directory: str, ticker: str) -> Optional[str]:
     return None
 
 
-def load_and_filter_csv(csv_path: str, ticker: str) -> pd.DataFrame:
+def load_and_filter_csv(csv_path: str, asset_name: str = None) -> pd.DataFrame:
     logger.info(f"Loading CSV file: {csv_path}")
     
     df = pd.read_csv(csv_path)
@@ -80,9 +80,9 @@ def load_and_filter_csv(csv_path: str, ticker: str) -> pd.DataFrame:
     
     df = standardize_columns(df)
     
-    if 'ticker' in df.columns:
-        logger.info(f"Found 'ticker' column, filtering for {ticker}")
-        df = df[df['ticker'].str.upper() == ticker.upper()]
+    if 'ticker' in df.columns and asset_name is not None:
+        logger.info(f"Found 'ticker' column, filtering for {asset_name}")
+        df = df[df['ticker'].str.upper() == asset_name.upper()]
         logger.info(f"After filtering by ticker: {len(df)} rows")
     
     required_cols = ['date', 'open', 'high', 'low', 'close', 'volume']
@@ -104,7 +104,7 @@ def validate_data(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     for col in ['open', 'high', 'low', 'close', 'volume']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     
-    df = df.sort_values('date').reset_index(drop=True)
+    df = df.sort_values(['asset', 'date'] if 'asset' in df.columns else 'date').reset_index(drop=True)
     
     start_date = pd.Timestamp(config['data']['start_date'])
     end_date = pd.Timestamp(config['data']['end_date'])
@@ -126,7 +126,7 @@ def validate_data(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     return df
 
 
-def load_data_from_csv(config: dict) -> pd.DataFrame:
+def load_single_ticker(config: dict) -> pd.DataFrame:
     ticker = config['data']['ticker']
     csv_path = config['data']['csv_path']
     local_csv_path = config['data']['local_csv_path']
@@ -159,10 +159,96 @@ def load_data_from_csv(config: dict) -> pd.DataFrame:
     
     df = load_and_filter_csv(actual_csv_path, ticker)
     
+    df['asset'] = ticker
+    
     df = validate_data(df, config)
     
-    logger.info(f"Successfully loaded {len(df)} rows")
+    logger.info(f"Successfully loaded {len(df)} rows for {ticker}")
     logger.info(f"Date range: {df['date'].min()} to {df['date'].max()}")
     logger.info(f"Columns: {df.columns.tolist()}")
     
     return df
+
+
+def load_multi_asset(config: dict) -> pd.DataFrame:
+    assets = config['data'].get('assets', {})
+    local_assets = config['data'].get('local_assets', {})
+    
+    if not assets and not local_assets:
+        raise ValueError("No assets configured. Please specify 'assets' or 'local_assets' in config.")
+    
+    all_dfs = []
+    
+    for asset_name, csv_path in assets.items():
+        local_path = local_assets.get(asset_name)
+        
+        actual_path = None
+        
+        if os.path.exists(csv_path):
+            actual_path = csv_path
+            logger.info(f"Found Kaggle path for {asset_name}: {csv_path}")
+        elif local_path and os.path.exists(local_path):
+            actual_path = local_path
+            logger.info(f"Found local path for {asset_name}: {local_path}")
+        else:
+            logger.error(f"File not found for asset: {asset_name}")
+            logger.error(f"  Kaggle path: {csv_path}")
+            if local_path:
+                logger.error(f"  Local path: {local_path}")
+            raise FileNotFoundError(f"Data file not found for asset: {asset_name}")
+        
+        logger.info(f"Loading asset: {asset_name}")
+        logger.info(f"  File path: {actual_path}")
+        
+        df = load_and_filter_csv(actual_path, asset_name)
+        df['asset'] = asset_name
+        
+        df['date'] = pd.to_datetime(df['date'])
+        
+        start_date = pd.Timestamp(config['data']['start_date'])
+        end_date = pd.Timestamp(config['data']['end_date'])
+        df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+        
+        initial_len = len(df)
+        df = df.dropna()
+        dropped = initial_len - len(df)
+        
+        logger.info(f"  Date range: {df['date'].min()} to {df['date'].max()}")
+        logger.info(f"  Row count: {len(df)} (dropped {dropped} NaN rows)")
+        
+        all_dfs.append(df)
+    
+    if not all_dfs:
+        raise ValueError("No data loaded from any asset")
+    
+    combined_df = pd.concat(all_dfs, ignore_index=True)
+    
+    combined_df = combined_df.sort_values(['asset', 'date']).reset_index(drop=True)
+    
+    logger.info("=" * 60)
+    logger.info("Multi-Asset Data Summary")
+    logger.info("=" * 60)
+    
+    for asset_name in assets.keys():
+        asset_df = combined_df[combined_df['asset'] == asset_name]
+        if len(asset_df) > 0:
+            logger.info(f"  {asset_name}: {len(asset_df)} rows, "
+                       f"{asset_df['date'].min().date()} to {asset_df['date'].max().date()}")
+    
+    logger.info(f"Total combined rows: {len(combined_df)}")
+    logger.info("=" * 60)
+    
+    return combined_df
+
+
+def load_data_from_csv(config: dict) -> pd.DataFrame:
+    data_mode = config['data'].get('mode', 'single_ticker')
+    
+    logger.info(f"Data loading mode: {data_mode}")
+    
+    if data_mode == 'single_ticker':
+        return load_single_ticker(config)
+    elif data_mode == 'multi_asset':
+        return load_multi_asset(config)
+    else:
+        raise ValueError(f"Unknown data mode: {data_mode}. Supported modes: 'single_ticker', 'multi_asset'")

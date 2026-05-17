@@ -38,6 +38,7 @@ logger = setup_logger()
 def run_single_experiment(
     df_features: pd.DataFrame,
     base_config: dict,
+    data_mode: str,
     feature_mode: str,
     horizon: int,
     threshold: float,
@@ -52,12 +53,12 @@ def run_single_experiment(
     config['label']['neutral_policy'] = neutral_policy
     config['model']['epochs'] = epochs
     
-    exp_name = f"feature_{feature_mode}_horizon_{horizon}_threshold_{str(threshold).replace('.', 'p')}"
+    exp_name = f"data_{data_mode}_feature_{feature_mode}_horizon_{horizon}_threshold_{str(threshold).replace('.', 'p')}"
     exp_dir = experiment_dir / exp_name
     ensure_dir(str(exp_dir))
     
     logger.info("=" * 60)
-    logger.info(f"Experiment: feature_mode={feature_mode}, horizon={horizon}, threshold={threshold}")
+    logger.info(f"Experiment: data_mode={data_mode}, feature_mode={feature_mode}, horizon={horizon}, threshold={threshold}")
     logger.info("=" * 60)
     
     data_dict = build_dataset(df_features, config)
@@ -66,6 +67,7 @@ def run_single_experiment(
     y = data_dict['y']
     dates = data_dict['dates']
     future_returns = data_dict['future_returns']
+    assets = data_dict['assets']
     train_idx = data_dict['train_idx']
     val_idx = data_dict['val_idx']
     test_idx = data_dict['test_idx']
@@ -83,6 +85,13 @@ def run_single_experiment(
         return None
     
     logger.info(f"Train: {n_train}, Val: {n_val}, Test: {n_test}")
+    
+    n_assets = 0
+    assets_list = []
+    if assets is not None:
+        n_assets = len(np.unique(assets))
+        assets_list = np.unique(assets).tolist()
+        logger.info(f"Assets: {assets_list}")
     
     X_img = encode_gadf(X_ts, config)
     
@@ -146,6 +155,7 @@ def run_single_experiment(
         y_test = y[test_idx]
         dates_test = dates[test_idx]
         future_returns_test = future_returns[test_idx]
+        assets_test = assets[test_idx] if assets is not None else None
         
         probs, preds_default = predict(model, X_test, batch_size, device)
         
@@ -172,6 +182,7 @@ def run_single_experiment(
         baseline = {'majority_class_accuracy': None}
         diagnostics = {'collapsed_prediction': None, 'ready_for_lrp': None, 'beats_majority_baseline': None}
         best_threshold = 0.5
+        assets_test = None
     
     label_filtering_path = Path('outputs/reports/label_filtering_stats.json')
     if label_filtering_path.exists():
@@ -193,6 +204,9 @@ def run_single_experiment(
         accuracy_minus_baseline = metrics['accuracy'] - baseline['majority_class_accuracy']
     
     result = {
+        'data_mode': data_mode,
+        'n_assets': n_assets,
+        'assets': str(assets_list) if assets_list else None,
         'feature_mode': feature_mode,
         'horizon': horizon,
         'threshold': threshold,
@@ -228,6 +242,8 @@ def main(config_path: str, quick: bool = False):
     
     set_seed(config['runtime']['seed'])
     
+    data_mode = config['data'].get('mode', 'single_ticker')
+    
     if quick:
         feature_modes = ['paper']
         horizons = [5, 10]
@@ -236,13 +252,14 @@ def main(config_path: str, quick: bool = False):
         logger.info("Running in QUICK mode (reduced combinations, 8 epochs)")
     else:
         feature_modes = ['current', 'paper']
-        horizons = [1, 3, 5, 10]
-        thresholds = [0.0, 0.001, 0.002, 0.005]
+        horizons = [3, 5, 10]
+        thresholds = [0.0, 0.002]
         epochs = 15
-        logger.info("Running in FULL mode (all combinations, 15 epochs)")
+        logger.info("Running in FULL mode (2x3x2=12 combinations, 15 epochs)")
     
     neutral_policy = "drop"
     
+    logger.info(f"Data mode: {data_mode}")
     logger.info(f"Feature modes: {feature_modes}")
     logger.info(f"Horizons: {horizons}")
     logger.info(f"Thresholds: {thresholds}")
@@ -272,6 +289,7 @@ def main(config_path: str, quick: bool = False):
                     result = run_single_experiment(
                         df_features,
                         config,
+                        data_mode,
                         feature_mode,
                         horizon,
                         threshold,
@@ -306,6 +324,7 @@ def main(config_path: str, quick: bool = False):
         logger.info("=" * 60)
         
         ready_for_lrp_count = df_results['ready_for_lrp'].sum() if 'ready_for_lrp' in df_results.columns else 0
+        logger.info(f"Data mode: {data_mode}")
         logger.info(f"Total experiments: {len(results)}")
         logger.info(f"Experiments ready for LRP: {ready_for_lrp_count}")
         
@@ -316,13 +335,18 @@ def main(config_path: str, quick: bool = False):
                 logger.info(f"  feature={row['feature_mode']}, horizon={row['horizon']}, threshold={row['threshold']}: "
                            f"acc={row['test_accuracy']:.4f}, auc={row['roc_auc']:.4f}")
         else:
-            logger.warning("\nNo configuration beats majority baseline with AUC > 0.52")
+            if data_mode == 'multi_asset':
+                logger.warning("\nNo multi_asset configuration is ready for LRP.")
+            else:
+                logger.warning("\nNo configuration beats majority baseline with AUC > 0.52")
+            
             logger.info("\nTop configurations by AUC:")
             best_auc = df_results.nlargest(5, 'roc_auc')
             for _, row in best_auc.iterrows():
+                acc_baseline = f"{row['accuracy_minus_baseline']:.4f}" if row['accuracy_minus_baseline'] is not None else 'N/A'
                 logger.info(f"  feature={row['feature_mode']}, horizon={row['horizon']}, threshold={row['threshold']}: "
                            f"acc={row['test_accuracy']:.4f}, auc={row['roc_auc']:.4f}, "
-                           f"acc-baseline={row['accuracy_minus_baseline']:.4f if row['accuracy_minus_baseline'] is not None else 'N/A'}")
+                           f"acc-baseline={acc_baseline}")
     else:
         logger.warning("No experiments completed successfully.")
     

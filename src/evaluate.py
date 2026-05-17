@@ -1,6 +1,6 @@
 import warnings
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import matplotlib
 matplotlib.use('Agg')
@@ -48,13 +48,18 @@ def load_model(checkpoint_path: Path, device: torch.device) -> Tuple[torch.nn.Mo
     return model, config
 
 
-def load_data_by_split(config: dict, split: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def load_data_by_split(config: dict, split: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     processed_dir = Path('data/processed')
     
     X_img = np.load(processed_dir / 'X_img.npy')
     y = np.load(processed_dir / 'y.npy')
     dates = np.load(processed_dir / 'dates.npy', allow_pickle=True)
     future_returns = np.load(processed_dir / 'future_returns.npy')
+    
+    assets = None
+    assets_path = processed_dir / 'assets.npy'
+    if assets_path.exists():
+        assets = np.load(assets_path, allow_pickle=True)
     
     split_start = pd.Timestamp(config['split'][f'{split}_start'])
     split_end = pd.Timestamp(config['split'][f'{split}_end'])
@@ -69,14 +74,15 @@ def load_data_by_split(config: dict, split: str) -> Tuple[np.ndarray, np.ndarray
     y_split = y[split_idx]
     dates_split = dates[split_idx]
     future_returns_split = future_returns[split_idx]
+    assets_split = assets[split_idx] if assets is not None else None
     
-    return X_split, y_split, dates_split, future_returns_split
+    return X_split, y_split, dates_split, future_returns_split, assets_split
 
 
-def load_test_data(config: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    X_test, y_test, dates_test, future_returns_test = load_data_by_split(config, 'test')
+def load_test_data(config: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    X_test, y_test, dates_test, future_returns_test, assets_test = load_data_by_split(config, 'test')
     logger.info(f"Test samples: {len(X_test)}")
-    return X_test, y_test, dates_test, future_returns_test
+    return X_test, y_test, dates_test, future_returns_test, assets_test
 
 
 def predict(
@@ -274,13 +280,70 @@ def compute_diagnostics(
     return diagnostics
 
 
+def compute_per_asset_metrics(
+    assets: np.ndarray,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    probs: np.ndarray
+) -> List[Dict]:
+    unique_assets = np.unique(assets)
+    per_asset_results = []
+    
+    for asset_name in unique_assets:
+        asset_mask = assets == asset_name
+        
+        y_true_asset = y_true[asset_mask]
+        y_pred_asset = y_pred[asset_mask]
+        probs_asset = probs[asset_mask]
+        
+        n_test = len(y_true_asset)
+        n_label_0 = int(np.sum(y_true_asset == 0))
+        n_label_1 = int(np.sum(y_true_asset == 1))
+        pred_0_count = int(np.sum(y_pred_asset == 0))
+        pred_1_count = int(np.sum(y_pred_asset == 1))
+        
+        accuracy = accuracy_score(y_true_asset, y_pred_asset)
+        
+        majority_baseline = max(n_label_0, n_label_1) / n_test if n_test > 0 else 0
+        
+        try:
+            if len(np.unique(y_true_asset)) < 2:
+                roc_auc = None
+            else:
+                roc_auc = roc_auc_score(y_true_asset, probs_asset[:, 1])
+        except Exception:
+            roc_auc = None
+        
+        f1 = f1_score(y_true_asset, y_pred_asset, zero_division=0)
+        precision = precision_score(y_true_asset, y_pred_asset, zero_division=0)
+        recall = recall_score(y_true_asset, y_pred_asset, zero_division=0)
+        
+        per_asset_results.append({
+            'asset': asset_name,
+            'n_test': n_test,
+            'accuracy': accuracy,
+            'majority_baseline_accuracy': majority_baseline,
+            'roc_auc': roc_auc if roc_auc is not None else float('nan'),
+            'f1': f1,
+            'precision': precision,
+            'recall': recall,
+            'pred_0_count': pred_0_count,
+            'pred_1_count': pred_1_count,
+            'label_0_count': n_label_0,
+            'label_1_count': n_label_1
+        })
+    
+    return per_asset_results
+
+
 def save_predictions(
     dates: np.ndarray,
     y_true: np.ndarray,
     y_pred: np.ndarray,
     probs: np.ndarray,
     future_returns: np.ndarray,
-    save_path: Path
+    save_path: Path,
+    assets: np.ndarray = None
 ):
     df = pd.DataFrame({
         'date': dates,
@@ -290,6 +353,10 @@ def save_predictions(
         'prob_up': probs[:, 1],
         'future_return': future_returns
     })
+    
+    if assets is not None:
+        df['asset'] = assets
+        df = df[['asset', 'date', 'y_true', 'y_pred', 'prob_down', 'prob_up', 'future_return']]
     
     df.to_csv(save_path, index=False)
     logger.info(f"Saved predictions to {save_path}")
@@ -342,7 +409,7 @@ def evaluate_model(config: dict) -> Dict:
     
     batch_size = config['model']['batch_size']
     
-    X_val, y_val, _, _ = load_data_by_split(config, 'val')
+    X_val, y_val, _, _, assets_val = load_data_by_split(config, 'val')
     logger.info(f"Val samples for threshold optimization: {len(X_val)}")
     
     val_probs, _ = predict(model, X_val, batch_size, device)
@@ -351,7 +418,7 @@ def evaluate_model(config: dict) -> Dict:
     logger.info(f"Best decision threshold from validation: {best_threshold:.2f}")
     logger.info(f"Val balanced accuracy with best threshold: {val_metrics['balanced_accuracy']:.4f}")
     
-    X_test, y_test, dates_test, future_returns_test = load_test_data(config)
+    X_test, y_test, dates_test, future_returns_test, assets_test = load_test_data(config)
     
     probs, preds_default = predict(model, X_test, batch_size, device)
     
@@ -429,6 +496,26 @@ def evaluate_model(config: dict) -> Dict:
     reports_dir = Path('outputs/reports')
     ensure_dir(str(reports_dir))
     
+    if assets_test is not None:
+        logger.info("=" * 60)
+        logger.info("Per-Asset Metrics")
+        logger.info("=" * 60)
+        
+        per_asset_metrics = compute_per_asset_metrics(
+            assets_test, y_test, preds_with_threshold, probs
+        )
+        
+        per_asset_df = pd.DataFrame(per_asset_metrics)
+        per_asset_df.to_csv(reports_dir / 'per_asset_metrics.csv', index=False)
+        logger.info(f"Saved per-asset metrics to {reports_dir / 'per_asset_metrics.csv'}")
+        
+        for row in per_asset_metrics:
+            logger.info(
+                f"  {row['asset']}: n={row['n_test']}, acc={row['accuracy']:.4f}, "
+                f"auc={row['roc_auc']:.4f if row['roc_auc'] is not None and not pd.isna(row['roc_auc']) else 'N/A'}, "
+                f"f1={row['f1']:.4f}"
+            )
+    
     decision_threshold_info = {
         'best_decision_threshold': float(best_threshold),
         'selection_metric': 'val_balanced_accuracy',
@@ -451,7 +538,8 @@ def evaluate_model(config: dict) -> Dict:
     
     save_predictions(
         dates_test, y_test, preds_with_threshold, probs, future_returns_test,
-        reports_dir / 'predictions.csv'
+        reports_dir / 'predictions.csv',
+        assets=assets_test
     )
     
     cm = np.array(metrics['confusion_matrix'])
