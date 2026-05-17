@@ -1,0 +1,55 @@
+data:
+  source: "csv"
+  ticker: "SPY"
+  csv_path: "/kaggle/input/sp500-nasdaq-spy-qqq-ohlcv-data"
+  local_csv_path: "data/raw/SPY_1d.csv"
+  start_date: "2010-01-01"
+  end_date: "2024-12-31"
+  interval: "1d"
+
+features:
+  names:
+    - log_return
+    - volume_change
+    - RSI
+    - BIAS
+  rsi_period: 14
+  bias_period: 20
+
+label:
+  method: "future_average_close"
+  horizon: 5
+  threshold: 0.0
+
+dataset:
+  window_size: 64
+  image_size: 64
+
+split:
+  train_start: "2010-01-01"
+  train_end: "2018-12-31"
+  val_start: "2019-01-01"
+  val_end: "2020-12-31"
+  test_start: "2021-01-01"
+  test_end: "2024-12-31"
+
+model:
+  name: "simple_cnn"
+  in_channels: 4
+  num_classes: 2
+  batch_size: 32
+  epochs: 20
+  learning_rate: 0.001
+  weight_decay: 0.0001
+
+lrp:
+  max_samples: 500
+  save_npy: true
+
+clustering:
+  n_clusters: 5
+  pca_components: 50
+
+runtime:
+  seed: 42
+  device: "auto"

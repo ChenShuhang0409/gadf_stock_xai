@@ -1,0 +1,11 @@
+yfinance
+numpy
+pandas
+scikit-learn
+matplotlib
+pyts
+torch
+torchvision
+captum
+pyyaml
+tqdm
