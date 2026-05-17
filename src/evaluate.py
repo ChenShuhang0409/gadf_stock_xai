@@ -162,7 +162,9 @@ def compute_baseline_metrics(y_true: np.ndarray) -> Dict:
 def compute_diagnostics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
-    probs: np.ndarray
+    probs: np.ndarray,
+    model_accuracy: float = None,
+    majority_baseline_accuracy: float = None
 ) -> Dict:
     pred_0_count = int(np.sum(y_pred == 0))
     pred_1_count = int(np.sum(y_pred == 1))
@@ -178,15 +180,37 @@ def compute_diagnostics(
     unique_pred_classes = sorted(list(set(y_pred.tolist())))
     collapsed = len(unique_pred_classes) == 1
     
-    if collapsed:
-        recommendation = "Do not run LRP or clustering until model predicts both classes."
+    try:
+        if len(np.unique(y_true)) < 2:
+            roc_auc = None
+        else:
+            roc_auc = roc_auc_score(y_true, probs[:, 1])
+    except Exception:
+        roc_auc = None
+    
+    beats_majority_baseline = False
+    auc_above_threshold = False
+    ready_for_lrp = False
+    
+    if model_accuracy is not None and majority_baseline_accuracy is not None:
+        beats_majority_baseline = model_accuracy > majority_baseline_accuracy
+    
+    if roc_auc is not None:
+        auc_above_threshold = roc_auc > 0.52
+    
+    if not collapsed and beats_majority_baseline and auc_above_threshold:
+        ready_for_lrp = True
+        recommendation = "Model predicts both classes, beats baseline, and has AUC > 0.52. LRP and clustering can be considered."
     else:
-        recommendation = "Model predicts both classes. LRP and clustering can be considered."
+        recommendation = "Do not run LRP or clustering. Model has not beaten baseline or AUC is too weak."
     
     diagnostics = {
         'collapsed_prediction': collapsed,
         'unique_pred_classes': unique_pred_classes,
         'recommendation': recommendation,
+        'beats_majority_baseline': beats_majority_baseline,
+        'auc_above_threshold': auc_above_threshold,
+        'ready_for_lrp': ready_for_lrp,
         'test_pred_0_count': pred_0_count,
         'test_pred_1_count': pred_1_count,
         'test_prob_up_mean': prob_up_mean,
@@ -282,7 +306,11 @@ def evaluate_model(config: dict) -> Dict:
     
     metrics = compute_metrics(y_test, preds, probs)
     baseline = compute_baseline_metrics(y_test)
-    diagnostics = compute_diagnostics(y_test, preds, probs)
+    diagnostics = compute_diagnostics(
+        y_test, preds, probs,
+        model_accuracy=metrics['accuracy'],
+        majority_baseline_accuracy=baseline['majority_class_accuracy']
+    )
     
     logger.info("=" * 60)
     logger.info("Test Set Results")
